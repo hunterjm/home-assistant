@@ -1046,7 +1046,8 @@ async def test_new_users(mock_hass):
                         "name": "Test Name",
                     },
                 ],
-            }
+            },
+            {"type": "legacy_api_password", "api_password": "password"},
         ],
         [],
     )
@@ -1079,7 +1080,19 @@ async def test_new_users(mock_hass):
             is_new=True,
         )
     )
-    assert user_cred.is_admin
+    assert not user_cred.is_admin
+
+    api_cred = await manager.async_get_or_create_user(
+        auth_models.Credentials(
+            id="mock-id-2",
+            auth_provider_type="legacy_api_password",
+            auth_provider_id=None,
+            data={},
+            is_new=True,
+        )
+    )
+    assert api_cred.is_admin
+    assert api_cred.groups[0].id == "system-admin"
 
 
 async def test_rename_does_not_change_refresh_token(mock_hass):

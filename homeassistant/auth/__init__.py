@@ -15,7 +15,7 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.util import dt as dt_util
 
 from . import auth_store, models
-from .const import ACCESS_TOKEN_EXPIRATION, GROUP_ID_ADMIN
+from .const import ACCESS_TOKEN_EXPIRATION
 from .mfa_modules import MultiFactorAuthModule, auth_mfa_module_from_config
 from .providers import AuthProvider, LoginFlow, auth_provider_from_config
 
@@ -280,7 +280,7 @@ class AuthManager:
             credentials=credentials,
             name=info.name,
             is_active=info.is_active,
-            group_ids=[GROUP_ID_ADMIN],
+            group_ids=info.group_ids or [],
         )
 
         self.hass.bus.async_fire(EVENT_USER_ADDED, {"user_id": user.id})

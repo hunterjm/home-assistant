@@ -1283,6 +1283,9 @@ python-homewizard-energy==1.0.3
 # homeassistant.components.izone
 python-izone==1.2.3
 
+# homeassistant.auth.providers.openid
+python-jose==3.3.0
+
 # homeassistant.components.juicenet
 python-juicenet==1.1.0
 

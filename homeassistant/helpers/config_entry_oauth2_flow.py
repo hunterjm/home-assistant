@@ -24,7 +24,7 @@ from yarl import URL
 from homeassistant import config_entries
 from homeassistant.components import http
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.data_entry_flow import FlowResult, UnknownFlow
 from homeassistant.loader import async_get_application_credentials
 
 from .aiohttp_client import async_get_clientsession
@@ -430,13 +430,18 @@ class OAuth2AuthorizeCallbackView(http.HomeAssistantView):
         else:
             return web.Response(text="Missing code or error parameter")
 
-        await hass.config_entries.flow.async_configure(
-            flow_id=state["flow_id"], user_input=user_input
-        )
+        try:
+            await hass.config_entries.flow.async_configure(
+                flow_id=state["flow_id"], user_input=user_input
+            )
+        except UnknownFlow:
+            await hass.auth.login_flow.async_configure(
+                flow_id=state["flow_id"], user_input=user_input
+            )
 
         return web.Response(
             headers={"content-type": "text/html"},
-            text="<script>window.close()</script>",
+            text="<script>if (window.opener) { window.opener.postMessage({type: 'externalCallback'}); } window.close();</script>",
         )
 
 

@@ -12,7 +12,7 @@ from homeassistant.const import __version__
 from homeassistant.util import dt as dt_util
 
 from . import permissions as perm_mdl
-from .const import GROUP_ID_ADMIN
+from .const import GROUP_ID_ADMIN, GROUP_ID_USER
 
 TOKEN_TYPE_NORMAL = "normal"
 TOKEN_TYPE_SYSTEM = "system"
@@ -134,3 +134,4 @@ class UserMeta(NamedTuple):
 
     name: str | None
     is_active: bool
+    group_ids: list[str] | None = [GROUP_ID_USER]

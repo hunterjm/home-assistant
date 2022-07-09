@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import voluptuous as vol
 
+from homeassistant.auth.const import GROUP_ID_ADMIN
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
@@ -76,7 +77,9 @@ class LegacyApiPasswordAuthProvider(AuthProvider):
 
         Will be used to populate info when creating a new user.
         """
-        return UserMeta(name=LEGACY_USER_NAME, is_active=True)
+        return UserMeta(
+            name=LEGACY_USER_NAME, is_active=True, group_ids=[GROUP_ID_ADMIN]
+        )
 
 
 class LegacyLoginFlow(LoginFlow):

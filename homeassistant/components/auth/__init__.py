@@ -485,12 +485,17 @@ async def websocket_create_long_lived_access_token(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg
 ):
     """Create or a long-lived access token."""
+    current_token = await hass.auth.async_get_refresh_token(connection.refresh_token_id)
+    credential = None
+    if current_token:
+        credential = current_token.credential
     refresh_token = await hass.auth.async_create_refresh_token(
         connection.user,
         client_name=msg["client_name"],
         client_icon=msg.get("client_icon"),
         token_type=TOKEN_TYPE_LONG_LIVED_ACCESS_TOKEN,
         access_token_expiration=timedelta(days=msg["lifespan"]),
+        credential=credential,
     )
 
     try:
