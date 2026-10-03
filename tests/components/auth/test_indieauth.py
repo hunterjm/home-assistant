@@ -2,9 +2,11 @@
 
 import asyncio
 import json
+import socket
 from unittest.mock import patch
 
 import aiohttp
+from aiohttp.abc import ResolveResult
 import pytest
 
 from homeassistant.components.auth import indieauth
@@ -34,6 +36,12 @@ def test_client_id_scheme() -> None:
 
     with pytest.raises(ValueError):
         indieauth._parse_client_id("ftp://ex.com")
+
+
+@pytest.mark.parametrize("client_id", ["https:/client", "https://", "https:///client"])
+def test_client_id_missing_hostname(client_id: str) -> None:
+    """Test malformed client identifiers are rejected without raising."""
+    assert not indieauth.verify_client_id(client_id)
 
 
 def test_client_id_path() -> None:
@@ -221,12 +229,13 @@ async def test_fetch_redirect_uris_metadata_document(
 async def test_fetch_redirect_uris_metadata_document_text_plain(
     hass: HomeAssistant, mock_session: AiohttpClientMocker
 ) -> None:
-    """Test the metadata document is parsed regardless of content type."""
+    """Test metadata needs a JSON content type to avoid ambiguous discovery."""
     mock_session.get(
         "https://example.com/client",
         text=json.dumps(
             {
                 "client_id": "https://example.com/client",
+                "client_name": "Test client",
                 "redirect_uris": ["https://example.com/callback"],
             }
         ),
@@ -236,7 +245,7 @@ async def test_fetch_redirect_uris_metadata_document_text_plain(
         hass, "https://example.com/client"
     )
 
-    assert redirect_uris == ["https://example.com/callback"]
+    assert redirect_uris == []
 
 
 async def test_fetch_redirect_uris_link_tag_precedence(
@@ -260,6 +269,26 @@ async def test_fetch_redirect_uris_link_tag_precedence(
     redirect_uris = await indieauth.fetch_redirect_uris(hass, "http://127.0.0.1:8000")
 
     assert redirect_uris == ["hass://oauth2_redirect"]
+
+
+@pytest.mark.parametrize(
+    "content_type", ["application/json", "text/plain", "text/html"]
+)
+async def test_fetch_redirect_uris_json_link_tag(
+    hass: HomeAssistant, mock_session: AiohttpClientMocker, content_type: str
+) -> None:
+    """Test a link inside JSON cannot bypass metadata validation."""
+    mock_session.get(
+        "https://example.com/client",
+        json={
+            "client_id": "https://other.com/client",
+            "client_name": "<link rel='redirect_uri' href='https://other.com/callback'>",
+            "redirect_uris": ["https://other.com/callback"],
+        },
+        headers={"Content-Type": content_type},
+    )
+
+    assert await indieauth.fetch_redirect_uris(hass, "https://example.com/client") == []
 
 
 @pytest.mark.parametrize(
@@ -405,6 +434,71 @@ async def test_verify_redirect_uri_metadata_document(
     )
 
 
+@pytest.mark.parametrize(
+    "client_id",
+    ["https://127.0.0.1/client", "https://192.168.1.2/client", "https://[::1]/client"],
+)
+async def test_fetch_redirect_uris_private_address(
+    hass: HomeAssistant, client_id: str
+) -> None:
+    """Test numeric private addresses never reach the metadata HTTP client."""
+    with patch.object(aiohttp, "ClientSession") as session:
+        assert await indieauth.fetch_redirect_uris(hass, client_id) == []
+    session.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "127.0.0.1",
+        "10.0.0.1",
+        "169.254.169.254",
+        "100.64.0.1",
+        "::1",
+        "fc00::1",
+        "fec0::1",
+    ],
+)
+async def test_client_metadata_resolver_private_address(address: str) -> None:
+    """Test mixed public/private DNS answers cannot reach the connector."""
+    addresses = [
+        ResolveResult(
+            hostname="example.com",
+            host=host,
+            port=443,
+            family=socket.AF_INET,
+            proto=socket.IPPROTO_TCP,
+            flags=socket.AI_NUMERICHOST,
+        )
+        for host in ("8.8.8.8", address)
+    ]
+    resolver = indieauth.ClientMetadataResolver()
+    with (
+        patch.object(indieauth.ThreadedResolver, "resolve", return_value=addresses),
+        pytest.raises(aiohttp.ClientConnectionError),
+    ):
+        await resolver.resolve("example.com", 443)
+    await resolver.close()
+
+
+async def test_client_metadata_resolver_public_address() -> None:
+    """Test the validated DNS answers are the ones used for the connection."""
+    addresses = [
+        ResolveResult(
+            hostname="example.com",
+            host="8.8.8.8",
+            port=443,
+            family=socket.AF_INET,
+            proto=socket.IPPROTO_TCP,
+            flags=socket.AI_NUMERICHOST,
+        )
+    ]
+    resolver = indieauth.ClientMetadataResolver()
+    with patch.object(indieauth.ThreadedResolver, "resolve", return_value=addresses):
+        assert await resolver.resolve("example.com", 443) is addresses
+    await resolver.close()
+
+
 async def test_verify_redirect_uri_unparsable(hass: HomeAssistant) -> None:
     """Test an unparsable requested redirect uri is rejected without raising."""
     assert not await indieauth.verify_redirect_uri(
@@ -497,20 +591,20 @@ async def test_fetch_redirect_uris_metadata_document_http_scheme(
 async def test_fetch_redirect_uris_metadata_document_redirected(
     hass: HomeAssistant, mock_session: AiohttpClientMocker
 ) -> None:
-    """Test a metadata document reached via a redirect is ignored."""
+    """Test HTTP redirects are rejected without requesting their targets."""
     mock_session.get(
         "https://example.com/client",
-        text=json.dumps(
-            {
-                "client_id": "https://example.com/client",
-                "redirect_uris": ["https://example.com/callback"],
-            }
-        ),
-        headers={"Content-Type": "application/json"},
-        history=(object(),),
+        status=302,
+        headers={"Location": "https://127.0.0.1/private"},
     )
-
-    assert await indieauth.fetch_redirect_uris(hass, "https://example.com/client") == []
+    with patch.object(
+        mock_session, "match_request", wraps=mock_session.match_request
+    ) as request:
+        assert (
+            await indieauth.fetch_redirect_uris(hass, "https://example.com/client")
+            == []
+        )
+    assert request.call_args.kwargs["allow_redirects"] is False
 
 
 async def test_fetch_redirect_uris_metadata_document_private_use_scheme(

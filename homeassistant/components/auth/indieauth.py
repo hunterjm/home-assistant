@@ -2,14 +2,17 @@
 
 from html.parser import HTMLParser
 from http import HTTPStatus
-from ipaddress import ip_address
+from ipaddress import IPv6Address, ip_address
 import json
 import logging
-from typing import override
+import socket
+from typing import NamedTuple, override
 from urllib.parse import ParseResult, urljoin, urlparse
 
 import aiohttp
+from aiohttp.abc import ResolveResult
 import aiohttp.client_exceptions
+from aiohttp.resolver import ThreadedResolver
 
 from homeassistant.core import HomeAssistant
 from homeassistant.util.network import is_local
@@ -132,38 +135,91 @@ def _is_valid_metadata_redirect_uri(redirect_uri: str) -> bool:
     return bool(parts.scheme) and "#" not in redirect_uri
 
 
+class ClientInfo(NamedTuple):
+    """A client's registered redirect URIs and discovery format."""
+
+    redirect_uris: list[str]
+    is_indieauth: bool = False
+
+
+def _is_public_address(host: str) -> bool:
+    """Return whether a numeric address is safe for public client discovery."""
+    address = ip_address(host)
+    return (
+        address.is_global
+        and not address.is_multicast
+        and not address.is_reserved
+        and not (isinstance(address, IPv6Address) and address.is_site_local)
+    )
+
+
+class ClientMetadataResolver(ThreadedResolver):
+    """Resolve public client hosts without allowing private-network connections."""
+
+    @override
+    async def resolve(
+        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> list[ResolveResult]:
+        """Validate the same DNS answers that the connector will use."""
+        addresses = await super().resolve(host, port, family)
+        if not addresses or any(
+            not _is_public_address(address["host"]) for address in addresses
+        ):
+            raise aiohttp.ClientConnectionError(
+                "Client metadata must use public addresses"
+            )
+        return addresses
+
+
 async def fetch_redirect_uris(hass: HomeAssistant, url: str) -> list[str]:
-    """Find the redirect_uri values that a client_id advertises.
+    """Find redirect URIs advertised by an IndieAuth page or client metadata."""
+    if (client_info := await _fetch_client_info(url)) is None:
+        return []
+    return client_info.redirect_uris
 
-    We support two formats, checked in this order:
 
-    IndieAuth 4.2.2
+async def _fetch_client_info(url: str) -> ClientInfo | None:
+    """Fetch client metadata, preserving legacy HTTP IndieAuth discovery."""
+    try:
+        parts = _parse_client_id(url)
+    except ValueError:
+        return None
+    public_only = parts.scheme == "https"
+    if public_only:
+        if "#" in url or any(ord(character) <= 32 for character in url):
+            return None
+        hostname = parts.hostname
+        assert hostname is not None
+        try:
+            is_public = _is_public_address(hostname)
+        except ValueError:
+            pass
+        else:
+            if not is_public:
+                return None
 
-    The client SHOULD publish one or more <link> tags or Link HTTP headers with
-    a rel attribute of redirect_uri at the client_id URL.
-
-    OAuth Client ID Metadata Document
-    (draft-ietf-oauth-client-id-metadata-document)
-
-    The client_id URL returns a JSON document with a redirect_uris array. As we
-    advertise client_id_metadata_document_supported in the authorization server
-    metadata, we fall back to this format when no link tags are found.
-
-    We read roughly the first 10kB of the page and a fetch error yields no
-    redirect uris.
-
-    We do not implement extracting redirect uris from headers.
-    """
     body: bytes = b""
-    status: int | None = None
-    redirected = False
+    content_type = ""
     try:
         async with (
-            aiohttp.ClientSession() as session,
-            session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp,
+            aiohttp.TCPConnector(
+                resolver=ClientMetadataResolver() if public_only else None
+            ) as connector,
+            aiohttp.ClientSession(
+                connector=connector, cookie_jar=aiohttp.DummyCookieJar()
+            ) as session,
+            session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=5),
+                allow_redirects=not public_only,
+                headers={"Accept": "application/json, text/html;q=0.9"},
+            ) as resp,
         ):
-            status = resp.status
-            redirected = bool(resp.history)
+            if resp.status != HTTPStatus.OK:
+                return None
+            content_type = (
+                resp.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            )
             async for data in resp.content.iter_chunked(1024):
                 body += data
 
@@ -172,26 +228,39 @@ async def fetch_redirect_uris(hass: HomeAssistant, url: str) -> list[str]:
 
     except TimeoutError:
         _LOGGER.error("Timeout while looking up redirect_uri %s", url)
-        return []
+        return None
     except aiohttp.client_exceptions.ClientSSLError:
         _LOGGER.error("SSL error while looking up redirect_uri %s", url)
-        return []
+        return None
     except aiohttp.client_exceptions.ClientOSError as ex:
         _LOGGER.error("OS error while looking up redirect_uri %s: %s", url, ex.strerror)
-        return []
+        return None
     except aiohttp.client_exceptions.ClientConnectionError:
         _LOGGER.error(
             "Low level connection error while looking up redirect_uri %s", url
         )
-        return []
+        return None
     except aiohttp.client_exceptions.ClientError:
         _LOGGER.error("Unknown error while looking up redirect_uri %s", url)
-        return []
+        return None
 
-    if redirect_uris := _parse_link_tag_redirect_uris(url, body):
-        return redirect_uris
+    # JSON strings can contain link tags; never interpret those as IndieAuth HTML.
+    if content_type == "application/json" or content_type.endswith("+json"):
+        if content_type != "application/json" and not (
+            content_type.startswith("application/") and content_type.endswith("+json")
+        ):
+            return None
+        if not public_only or not urlparse(url).path:
+            return None
+        if redirect_uris := _parse_metadata_document_redirect_uris(
+            url, body, HTTPStatus.OK, False
+        ):
+            return ClientInfo(redirect_uris)
+        return None
 
-    return _parse_metadata_document_redirect_uris(url, body, status, redirected)
+    if body.lstrip().startswith(b"<"):
+        return ClientInfo(_parse_link_tag_redirect_uris(url, body), is_indieauth=True)
+    return None
 
 
 def _parse_link_tag_redirect_uris(url: str, body: bytes) -> list[str]:
@@ -314,6 +383,9 @@ def _parse_client_id(client_id: str) -> ParseResult:
     # MUST have either an https or http scheme
     if parts.scheme not in ("http", "https"):
         raise ValueError
+
+    if not parts.hostname:
+        raise ValueError("Client ID must contain a hostname")
 
     # MUST contain a path component
     # Handled by url canonicalization.
