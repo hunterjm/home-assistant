@@ -3,7 +3,6 @@
 from html.parser import HTMLParser
 from http import HTTPStatus
 from ipaddress import IPv6Address, ip_address
-import json
 import logging
 import socket
 from typing import NamedTuple, override
@@ -13,14 +12,42 @@ import aiohttp
 from aiohttp.abc import ResolveResult
 import aiohttp.client_exceptions
 from aiohttp.resolver import ThreadedResolver
+import probatio
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.network import NoURLAvailableError, get_url
+from homeassistant.util.json import json_loads
 from homeassistant.util.network import is_local
 
 _LOGGER = logging.getLogger(__name__)
 
 # We limit reads of a client_id page to the first 10kB.
 MAX_FETCH_BYTES = 10240
+
+CLIENT_METADATA_SCHEMA = probatio.Schema(
+    {
+        probatio.Required("client_id"): str,
+        probatio.Required("client_name"): probatio.All(str, probatio.Match(r"\s*\S")),
+        probatio.Required("redirect_uris"): [str],
+        probatio.Optional("token_endpoint_auth_method"): "none",
+        probatio.Optional("grant_types"): probatio.All(
+            [str], probatio.Contains("authorization_code")
+        ),
+        probatio.Optional("response_types"): probatio.All(
+            [str], probatio.Contains("code")
+        ),
+    },
+    extra=probatio.ALLOW_EXTRA,
+)
+
+
+def get_authorization_server_issuer(hass: HomeAssistant) -> str | None:
+    """Return the trusted HTTPS issuer for an RFC 9207 authorization response."""
+    try:
+        issuer = get_url(hass, require_current_request=True)
+    except NoURLAvailableError:
+        return None
+    return issuer if urlparse(issuer).scheme == "https" else None
 
 
 async def verify_redirect_uri(
@@ -32,10 +59,9 @@ async def verify_redirect_uri(
     except ValueError:
         return False
 
-    try:
-        redirect_parts = _parse_url(redirect_uri)
-    except ValueError:
+    if not _is_valid_redirect_uri(redirect_uri):
         return False
+    redirect_parts = _parse_url(redirect_uri)
 
     # Verify redirect url and client url have same scheme and domain.
     is_valid = (
@@ -43,7 +69,17 @@ async def verify_redirect_uri(
         and client_id_parts.netloc == redirect_parts.netloc
     )
 
-    if is_valid:
+    if is_valid and client_id_parts.scheme == "http":
+        return True
+
+    # The local frontend is pre-associated and must also work without internet.
+    if (
+        is_valid
+        and client_id_parts.path == "/"
+        and not client_id_parts.query
+        and (issuer := get_authorization_server_issuer(hass))
+        and client_id.rstrip("/") == issuer.rstrip("/")
+    ):
         return True
 
     # Whitelist the iOS and Android callbacks so that people can link apps
@@ -61,18 +97,17 @@ async def verify_redirect_uri(
     ):
         return True
 
-    # IndieAuth 4.2.2 allows for redirect_uri to be on different domain
-    # but needs to be specified in link tag when fetching `client_id`.
-    redirect_uris = await fetch_redirect_uris(hass, client_id)
-    if redirect_uri in redirect_uris:
+    if (client_info := await _fetch_client_info(client_id)) is None:
+        return False
+    if redirect_uri in client_info.redirect_uris:
         return True
-    _LOGGER.debug(
-        "redirect_uri %s is not among the advertised redirect uris %s for client_id %s",
-        redirect_uri,
-        redirect_uris,
-        client_id,
+    if client_info.is_indieauth:
+        return is_valid
+    loopback_uri = _without_loopback_port(redirect_uri)
+    return loopback_uri is not None and any(
+        _without_loopback_port(registered_uri) == loopback_uri
+        for registered_uri in client_info.redirect_uris
     )
-    return False
 
 
 class LinkTagParser(HTMLParser):
@@ -98,29 +133,8 @@ class LinkTagParser(HTMLParser):
             self.found.append(href)
 
 
-def _reject_json_constant(constant: str) -> None:
-    """Reject NaN/Infinity/-Infinity, which RFC 8259 does not allow."""
-    raise ValueError(f"Invalid JSON constant: {constant}")
-
-
-def _is_valid_metadata_client_id(url: str) -> bool:
-    """Validate a client_id URL for the metadata-document fallback.
-
-    The client identifier URL must be https with a path component and no
-    fragment (a bare trailing # counts as a fragment component). The remaining
-    client identifier rules are enforced upstream by _parse_client_id.
-    """
-    try:
-        parts = urlparse(url)
-        # urlparse defers port validation until the attribute is accessed.
-        _ = parts.port
-    except ValueError:
-        return False
-    return parts.scheme == "https" and bool(parts.path) and "#" not in url
-
-
-def _is_valid_metadata_redirect_uri(redirect_uri: str) -> bool:
-    """Validate a client ID metadata document redirect_uris entry.
+def _is_valid_redirect_uri(redirect_uri: str) -> bool:
+    """Validate a redirect URI's structure.
 
     Entries must be absolute, fragment-free URIs: a non-empty scheme (so
     private-use schemes like app:/callback stay valid) and no fragment per
@@ -132,7 +146,49 @@ def _is_valid_metadata_redirect_uri(redirect_uri: str) -> bool:
         _ = parts.port
     except ValueError:
         return False
-    return bool(parts.scheme) and "#" not in redirect_uri
+    return (
+        bool(parts.scheme)
+        and parts.scheme not in ("javascript", "data", "file", "vbscript")
+        and (parts.scheme not in ("http", "https") or bool(parts.hostname))
+        and "#" not in redirect_uri
+        and not any(ord(character) <= 32 for character in redirect_uri)
+    )
+
+
+def _is_valid_metadata_redirect_uri(redirect_uri: str) -> bool:
+    """Require secure web callbacks or local loopback HTTP for client metadata."""
+    if not _is_valid_redirect_uri(redirect_uri):
+        return False
+    parts = urlparse(redirect_uri)
+    if parts.username is not None:
+        return False
+    if parts.scheme != "http" or parts.hostname == "localhost":
+        return True
+    assert parts.hostname is not None
+    try:
+        return ip_address(parts.hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _without_loopback_port(redirect_uri: str) -> str | None:
+    """Remove only the port from a numeric loopback HTTP URI (RFC 8252)."""
+    parts = urlparse(redirect_uri)
+    if parts.scheme != "http" or parts.username is not None:
+        return None
+    assert parts.hostname is not None
+    try:
+        address = ip_address(parts.hostname)
+    except ValueError:
+        return None
+    if not address.is_loopback:
+        return None
+    host = (
+        f"{parts.netloc.partition(']')[0]}]"
+        if parts.netloc.startswith("[")
+        else parts.netloc.partition(":")[0]
+    )
+    return redirect_uri.replace(f"//{parts.netloc}", f"//{host}", 1)
 
 
 class ClientInfo(NamedTuple):
@@ -252,9 +308,7 @@ async def _fetch_client_info(url: str) -> ClientInfo | None:
             return None
         if not public_only or not urlparse(url).path:
             return None
-        if redirect_uris := _parse_metadata_document_redirect_uris(
-            url, body, HTTPStatus.OK, False
-        ):
+        if redirect_uris := _parse_metadata_document_redirect_uris(url, body):
             return ClientInfo(redirect_uris)
         return None
 
@@ -275,54 +329,21 @@ def _parse_link_tag_redirect_uris(url: str, body: bytes) -> list[str]:
     return [urljoin(url, found) for found in parser.found]
 
 
-def _parse_metadata_document_redirect_uris(
-    url: str, body: bytes, status: int | None, redirected: bool
-) -> list[str]:
-    """Parse the client_id page body as an OAuth Client ID Metadata Document.
-
-    Per draft-ietf-oauth-client-id-metadata-document the document only counts
-    when the client_id URL is https with a path and no fragment, the response
-    was a direct 200 (not redirected), the document's client_id round-trips,
-    and every redirect_uris entry is an absolute, fragment-free URI matched
-    exactly. The url and its document are client-controlled and fetched
-    unauthenticated, so rejections log at DEBUG (higher levels would be a
-    log-flood vector).
-    """
+def _parse_metadata_document_redirect_uris(url: str, body: bytes) -> list[str]:
+    """Validate client metadata and extract its exact registered redirect URIs."""
     # A body at the read cap may be truncated; a truncated prefix must not be
     # trusted even if it happens to be parseable.
-    if (
-        len(body) >= MAX_FETCH_BYTES
-        or status != HTTPStatus.OK
-        or redirected
-        or not _is_valid_metadata_client_id(url)
-    ):
-        _LOGGER.debug(
-            "Not treating %s as a client ID metadata document: body length %s,"
-            " status %s, redirected %s (client_id must be a fragment-free https"
-            " URL with a path)",
-            url,
-            len(body),
-            status,
-            redirected,
-        )
+    if len(body) >= MAX_FETCH_BYTES:
+        _LOGGER.debug("Client ID metadata document at %s exceeds the size limit", url)
         return []
 
     try:
-        # Strict decode (RFC 8259 requires UTF-8): the link tag parser's
-        # lenient replacement decode would mask invalid bytes as U+FFFD.
-        document = json.loads(body.decode(), parse_constant=_reject_json_constant)
-    except UnicodeDecodeError:
-        _LOGGER.debug("Client ID metadata document at %s is not valid UTF-8", url)
-        return []
-    except ValueError:
-        _LOGGER.debug("Client ID metadata document at %s is not valid JSON", url)
+        document = CLIENT_METADATA_SCHEMA(json_loads(body))
+    except ValueError, probatio.Invalid:
+        _LOGGER.debug("Invalid client ID metadata document at %s", url)
         return []
 
-    if not isinstance(document, dict):
-        _LOGGER.debug("Client ID metadata document at %s is not a JSON object", url)
-        return []
-
-    if document.get("client_id") != url:
+    if document["client_id"] != url:
         _LOGGER.debug(
             "Client ID metadata document at %s client_id does not match the"
             " document URL",
@@ -330,13 +351,16 @@ def _parse_metadata_document_redirect_uris(
         )
         return []
 
+    if "client_secret" in document or "client_secret_expires_at" in document:
+        _LOGGER.debug(
+            "Client ID metadata document at %s requires unsupported authentication", url
+        )
+        return []
+
     # redirect_uris entries are returned unmodified for RFC 6749 exact matching
     # rather than resolving relative references.
-    redirect_uris = document.get("redirect_uris")
-    if not isinstance(redirect_uris, list) or not all(
-        isinstance(redirect_uri, str) and _is_valid_metadata_redirect_uri(redirect_uri)
-        for redirect_uri in redirect_uris
-    ):
+    redirect_uris: list[str] = document["redirect_uris"]
+    if not all(_is_valid_metadata_redirect_uri(uri) for uri in redirect_uris):
         _LOGGER.debug(
             "Client ID metadata document at %s has missing or invalid redirect_uris",
             url,

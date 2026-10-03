@@ -14,6 +14,8 @@ from . import BASE_CONFIG, async_setup_auth
 from tests.common import CLIENT_ID, CLIENT_REDIRECT_URI
 from tests.typing import ClientSessionGenerator
 
+pytestmark = pytest.mark.usefixtures("mock_client_info")
+
 _TRUSTED_NETWORKS_CONFIG = {
     "type": "trusted_networks",
     "trusted_networks": ["192.168.0.1"],
@@ -222,8 +224,8 @@ async def test_invalid_redirect_uri(
 
     with (
         patch(
-            "homeassistant.components.auth.indieauth.fetch_redirect_uris",
-            return_value=[],
+            "homeassistant.components.auth.indieauth._fetch_client_info",
+            return_value=None,
         ),
         patch(
             "homeassistant.components.http.ban.process_wrong_login"

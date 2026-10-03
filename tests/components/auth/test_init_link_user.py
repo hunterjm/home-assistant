@@ -4,12 +4,16 @@ from http import HTTPStatus
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from homeassistant.core import HomeAssistant
 
 from . import async_setup_auth
 
 from tests.common import CLIENT_ID, CLIENT_REDIRECT_URI
 from tests.typing import ClientSessionGenerator
+
+pytestmark = pytest.mark.usefixtures("mock_client_info")
 
 
 async def async_get_code(

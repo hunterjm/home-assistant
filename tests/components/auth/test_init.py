@@ -28,6 +28,8 @@ from . import async_setup_auth
 from tests.common import CLIENT_ID, CLIENT_REDIRECT_URI, MockUser
 from tests.typing import ClientSessionGenerator, WebSocketGenerator
 
+pytestmark = pytest.mark.usefixtures("mock_client_info")
+
 
 @pytest.fixture
 def mock_credential():

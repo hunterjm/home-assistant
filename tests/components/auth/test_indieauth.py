@@ -1,6 +1,7 @@
 """Tests for the client validator."""
 
 import asyncio
+from collections.abc import Generator
 import json
 import socket
 from unittest.mock import patch
@@ -16,7 +17,7 @@ from tests.test_util.aiohttp import AiohttpClientMocker
 
 
 @pytest.fixture
-def mock_session():
+def mock_session() -> Generator[AiohttpClientMocker]:
     """Mock aiohttp.ClientSession."""
     mocker = AiohttpClientMocker()
 
@@ -124,7 +125,7 @@ async def test_verify_redirect_uri() -> None:
         None, "http://ex.com", "http://ex.com/callback"
     )
 
-    with patch.object(indieauth, "fetch_redirect_uris", return_value=[]):
+    with patch.object(indieauth, "_fetch_client_info", return_value=None):
         # Different domain
         assert not await indieauth.verify_redirect_uri(
             None, "http://ex.com", "http://different.com/callback"
@@ -208,6 +209,7 @@ async def test_fetch_redirect_uris_metadata_document(
         text=json.dumps(
             {
                 "client_id": "https://example.com/client",
+                "client_name": "Test client",
                 "redirect_uris": [
                     "https://example.com/callback",
                     "https://other.com/callback",
@@ -292,11 +294,56 @@ async def test_fetch_redirect_uris_json_link_tag(
 
 
 @pytest.mark.parametrize(
+    "metadata",
+    [
+        pytest.param(
+            {"token_endpoint_auth_method": "private_key_jwt"}, id="private-key"
+        ),
+        pytest.param({"token_endpoint_auth_method": "client_secret_basic"}, id="basic"),
+        pytest.param({"token_endpoint_auth_method": "client_secret_post"}, id="post"),
+        pytest.param({"token_endpoint_auth_method": None}, id="null-method"),
+        pytest.param(
+            {
+                "token_endpoint_auth_method": "private_key_jwt",
+                "token_endpoint_auth_methods_supported": ["none", "private_key_jwt"],
+            },
+            id="no-authentication-downgrade",
+        ),
+        pytest.param({"client_secret": "secret"}, id="secret"),
+        pytest.param({"client_secret_expires_at": 0}, id="secret-expiry"),
+        pytest.param({"client_name": ""}, id="empty-name"),
+        pytest.param({"client_name": None}, id="null-name"),
+        pytest.param({"grant_types": ["client_credentials"]}, id="unsupported-grant"),
+        pytest.param({"response_types": ["token"]}, id="unsupported-response"),
+    ],
+)
+async def test_fetch_redirect_uris_metadata_document_authentication(
+    hass: HomeAssistant,
+    mock_session: AiohttpClientMocker,
+    metadata: dict[str, object],
+) -> None:
+    """Test clients requiring unsupported authentication are not treated as public."""
+    mock_session.get(
+        "https://example.com/client",
+        json={
+            "client_id": "https://example.com/client",
+            "client_name": "Test client",
+            "redirect_uris": ["https://other.com/callback"],
+            **metadata,
+        },
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert await indieauth.fetch_redirect_uris(hass, "https://example.com/client") == []
+
+
+@pytest.mark.parametrize(
     "text",
     [
         pytest.param("this is neither json nor html", id="not-json-not-html"),
         pytest.param('["https://example.com/callback"]', id="json-array"),
         pytest.param("42", id="json-scalar"),
+        pytest.param("[" * 2000 + "]" * 2000, id="deeply-nested-json"),
         pytest.param(
             json.dumps({"redirect_uris": ["https://example.com/callback"]}),
             id="missing-client-id",
@@ -309,6 +356,16 @@ async def test_fetch_redirect_uris_json_link_tag(
             json.dumps(
                 {
                     "client_id": "https://example.com/client",
+                    "redirect_uris": ["https://example.com/callback"],
+                }
+            ),
+            id="missing-client-name",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "client_id": "https://example.com/client",
+                    "client_name": "Test client",
                     "redirect_uris": [],
                 }
             ),
@@ -318,6 +375,7 @@ async def test_fetch_redirect_uris_json_link_tag(
             json.dumps(
                 {
                     "client_id": "https://other.example/client",
+                    "client_name": "Test client",
                     "redirect_uris": ["https://example.com/callback"],
                 }
             ),
@@ -327,6 +385,7 @@ async def test_fetch_redirect_uris_json_link_tag(
             json.dumps(
                 {
                     "client_id": "https://example.com/client",
+                    "client_name": "Test client",
                     "redirect_uris": "https://example.com/callback",
                 }
             ),
@@ -336,6 +395,7 @@ async def test_fetch_redirect_uris_json_link_tag(
             json.dumps(
                 {
                     "client_id": "https://example.com/client",
+                    "client_name": "Test client",
                     "redirect_uris": ["https://example.com/callback", 123],
                 }
             ),
@@ -345,6 +405,7 @@ async def test_fetch_redirect_uris_json_link_tag(
             json.dumps(
                 {
                     "client_id": "https://example.com/client",
+                    "client_name": "Test client",
                     "redirect_uris": ["/callback"],
                 }
             ),
@@ -354,6 +415,7 @@ async def test_fetch_redirect_uris_json_link_tag(
             json.dumps(
                 {
                     "client_id": "https://example.com/client",
+                    "client_name": "Test client",
                     "redirect_uris": ["https://example.com/callback#fragment"],
                 }
             ),
@@ -363,6 +425,7 @@ async def test_fetch_redirect_uris_json_link_tag(
             json.dumps(
                 {
                     "client_id": "https://example.com/client",
+                    "client_name": "Test client",
                     "redirect_uris": ["https://["],
                 }
             ),
@@ -372,6 +435,7 @@ async def test_fetch_redirect_uris_json_link_tag(
             json.dumps(
                 {
                     "client_id": "https://example.com/client",
+                    "client_name": "Test client",
                     "redirect_uris": ["https://example.com/callback#"],
                 }
             ),
@@ -381,6 +445,7 @@ async def test_fetch_redirect_uris_json_link_tag(
             json.dumps(
                 {
                     "client_id": "https://example.com/client",
+                    "client_name": "Test client",
                     "redirect_uris": ["https://example.com:not-a-port/callback"],
                 }
             ),
@@ -419,6 +484,7 @@ async def test_verify_redirect_uri_metadata_document(
         text=json.dumps(
             {
                 "client_id": client_id,
+                "client_name": "Test client",
                 "redirect_uris": ["https://other.com/callback"],
             }
         ),
@@ -432,6 +498,96 @@ async def test_verify_redirect_uri_metadata_document(
     assert not await indieauth.verify_redirect_uri(
         hass, client_id, "https://other.com/not-listed"
     )
+    assert not await indieauth.verify_redirect_uri(
+        hass, client_id, "https://example.com/not-listed"
+    )
+
+
+@pytest.mark.parametrize(
+    "client_id",
+    ["https://client.example/oauth/client.json", "https://client.example/"],
+)
+async def test_verify_redirect_uri_same_origin_metadata(
+    hass: HomeAssistant,
+    mock_session: AiohttpClientMocker,
+    client_id: str,
+) -> None:
+    """Test same-origin Example client callbacks use the published metadata registration."""
+    redirect_uri = "https://client.example/oauth/callback"
+    mock_session.get(
+        client_id,
+        json={
+            "client_id": client_id,
+            "client_name": "Example client",
+            "redirect_uris": [redirect_uri],
+            "token_endpoint_auth_method": "none",
+        },
+        headers={"Content-Type": "application/json"},
+    )
+    with patch.object(indieauth, "get_url", return_value="https://ha.example.com"):
+        assert await indieauth.verify_redirect_uri(hass, client_id, redirect_uri)
+        assert not await indieauth.verify_redirect_uri(
+            hass, client_id, "https://client.example/unregistered"
+        )
+
+
+@pytest.mark.parametrize(
+    "client_id", ["https://ha.example.com", "https://ha.example.com/"]
+)
+async def test_verify_redirect_uri_frontend_offline(
+    hass: HomeAssistant, client_id: str
+) -> None:
+    """Test the trusted first-party root client requires no external discovery."""
+    with (
+        patch.object(indieauth, "get_url", return_value="https://ha.example.com"),
+        patch.object(indieauth, "_fetch_client_info") as fetch,
+    ):
+        assert await indieauth.verify_redirect_uri(
+            hass, client_id, "https://ha.example.com/?auth_callback=1"
+        )
+    fetch.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "client_id", ["https://example.com", "https://example.com/client"]
+)
+async def test_verify_redirect_uri_https_indieauth(
+    hass: HomeAssistant, mock_session: AiohttpClientMocker, client_id: str
+) -> None:
+    """Test discovered HTML keeps IndieAuth same-origin and advertised redirects."""
+    mock_session.get(
+        client_id,
+        text='<html><link rel="redirect_uri" href="https://other.com/callback"></html>',
+        headers={"Content-Type": "text/html"},
+    )
+    with patch.object(indieauth, "get_url", return_value="https://ha.example.com"):
+        assert await indieauth.verify_redirect_uri(
+            hass, client_id, "https://example.com/callback"
+        )
+        assert await indieauth.verify_redirect_uri(
+            hass, client_id, "https://other.com/callback"
+        )
+
+
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "javascript:alert(1)",
+        "data:text/html,test",
+        "https:///callback",
+        "https://example.com/callback#fragment",
+        "https://example.com/callback\n",
+    ],
+)
+async def test_verify_redirect_uri_unsafe(
+    hass: HomeAssistant, redirect_uri: str
+) -> None:
+    """Test unsafe callback URIs are rejected before client discovery."""
+    with patch.object(indieauth, "_fetch_client_info") as fetch:
+        assert not await indieauth.verify_redirect_uri(
+            hass, "https://example.com/client", redirect_uri
+        )
+    fetch.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -538,6 +694,7 @@ async def test_fetch_redirect_uris_metadata_document_invalid_client_id(
         text=json.dumps(
             {
                 "client_id": client_id,
+                "client_name": "Test client",
                 "redirect_uris": ["https://other.com/callback"],
             }
         ),
@@ -556,6 +713,7 @@ async def test_fetch_redirect_uris_metadata_document_not_ok(
         text=json.dumps(
             {
                 "client_id": "https://example.com/client",
+                "client_name": "Test client",
                 "redirect_uris": ["https://example.com/callback"],
             }
         ),
@@ -576,6 +734,7 @@ async def test_fetch_redirect_uris_metadata_document_http_scheme(
         text=json.dumps(
             {
                 "client_id": client_id,
+                "client_name": "Test client",
                 "redirect_uris": ["https://other.com/callback"],
             }
         ),
@@ -616,6 +775,7 @@ async def test_fetch_redirect_uris_metadata_document_private_use_scheme(
         text=json.dumps(
             {
                 "client_id": "https://example.com/client",
+                "client_name": "Test client",
                 "redirect_uris": ["app:/oauth-callback"],
             }
         ),
@@ -627,6 +787,184 @@ async def test_fetch_redirect_uris_metadata_document_private_use_scheme(
     ]
 
 
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "http://localhost:3000/callback",
+        "http://127.0.0.1:3000/callback",
+        "http://[::1]:3000/callback",
+    ],
+)
+async def test_fetch_redirect_uris_metadata_loopback(
+    hass: HomeAssistant, mock_session: AiohttpClientMocker, redirect_uri: str
+) -> None:
+    """Test loopback clients can receive authorization codes over local HTTP."""
+    mock_session.get(
+        "https://example.com/client",
+        json={
+            "client_id": "https://example.com/client",
+            "client_name": "Test client",
+            "redirect_uris": [redirect_uri],
+        },
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert await indieauth.verify_redirect_uri(
+        hass, "https://example.com/client", redirect_uri
+    )
+
+
+@pytest.mark.parametrize(
+    ("registered_uri", "redirect_uri", "expected"),
+    [
+        pytest.param(
+            "http://127.0.0.1:3000/callback?client=one",
+            "http://127.0.0.1:49152/callback?client=one",
+            True,
+            id="ipv4-port",
+        ),
+        pytest.param(
+            "http://[::1]:3000/callback?client=one",
+            "http://[::1]:49152/callback?client=one",
+            True,
+            id="ipv6-port",
+        ),
+        pytest.param(
+            "http://127.0.0.1:3000/callback",
+            "http://127.0.0.1:49152/callback/",
+            False,
+            id="different-path",
+        ),
+        pytest.param(
+            "http://127.0.0.1:3000/callback?client=one",
+            "http://127.0.0.1:49152/callback?client=two",
+            False,
+            id="different-query",
+        ),
+        pytest.param(
+            "http://127.0.0.1:3000/callback",
+            "http://127.0.0.2:49152/callback",
+            False,
+            id="different-loopback-host",
+        ),
+        pytest.param(
+            "http://127.0.0.1:3000/callback",
+            "http://[::1]:49152/callback",
+            False,
+            id="different-ip-family",
+        ),
+        pytest.param(
+            "http://[::1]:3000/callback",
+            "http://[0:0:0:0:0:0:0:1]:49152/callback",
+            False,
+            id="different-host-spelling",
+        ),
+        pytest.param(
+            "http://127.0.0.1:3000/callback",
+            "HTTP://127.0.0.1:49152/callback",
+            False,
+            id="different-scheme-spelling",
+        ),
+        pytest.param(
+            "http://127.0.0.1:3000/callback",
+            "http://127.0.0.1:49152/callback?",
+            False,
+            id="empty-query-component",
+        ),
+        pytest.param(
+            "https://127.0.0.1:3000/callback",
+            "https://127.0.0.1:49152/callback",
+            False,
+            id="https-port",
+        ),
+        pytest.param(
+            "http://localhost:3000/callback",
+            "http://localhost:49152/callback",
+            False,
+            id="localhost-port",
+        ),
+    ],
+)
+async def test_verify_redirect_uri_metadata_loopback_port(
+    hass: HomeAssistant,
+    mock_session: AiohttpClientMocker,
+    registered_uri: str,
+    redirect_uri: str,
+    expected: bool,
+) -> None:
+    """Test only numeric loopback HTTP ports can vary from registered callbacks."""
+    mock_session.get(
+        "https://example.com/client",
+        json={
+            "client_id": "https://example.com/client",
+            "client_name": "Test client",
+            "redirect_uris": [registered_uri],
+        },
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert (
+        await indieauth.verify_redirect_uri(
+            hass, "https://example.com/client", redirect_uri
+        )
+        is expected
+    )
+
+
+async def test_verify_redirect_uri_indieauth_loopback_port(
+    hass: HomeAssistant, mock_session: AiohttpClientMocker
+) -> None:
+    """Test the metadata exception does not relax legacy HTML callback matching."""
+    mock_session.get(
+        "https://example.com/client",
+        text='<html><link rel="redirect_uri" href="http://127.0.0.1:3000/callback"></html>',
+        headers={"Content-Type": "text/html"},
+    )
+
+    assert not await indieauth.verify_redirect_uri(
+        hass, "https://example.com/client", "http://127.0.0.1:49152/callback"
+    )
+
+
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "http://example.com/callback",
+        "http://192.168.1.2/callback",
+        "http://localhost.example.com/callback",
+        "https://user@example.com/callback",
+        "https://user:password@example.com/callback",
+        "http://user@localhost:3000/callback",
+    ],
+)
+async def test_fetch_redirect_uris_metadata_insecure_callback(
+    hass: HomeAssistant, mock_session: AiohttpClientMocker, redirect_uri: str
+) -> None:
+    """Test metadata cannot register insecure web callbacks or misleading userinfo."""
+    mock_session.get(
+        "https://example.com/client",
+        json={
+            "client_id": "https://example.com/client",
+            "client_name": "Test client",
+            "redirect_uris": [redirect_uri],
+        },
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert not await indieauth.verify_redirect_uri(
+        hass, "https://example.com/client", redirect_uri
+    )
+
+
+async def test_verify_redirect_uri_local_frontend_http(hass: HomeAssistant) -> None:
+    """Test legacy first-party LAN HTTP login remains available."""
+    with patch.object(indieauth, "_fetch_client_info") as fetch:
+        assert await indieauth.verify_redirect_uri(
+            hass, "http://192.168.1.2:8123", "http://192.168.1.2:8123/?auth_callback=1"
+        )
+    fetch.assert_not_called()
+
+
 async def test_fetch_redirect_uris_metadata_document_oversized(
     hass: HomeAssistant, mock_session: AiohttpClientMocker
 ) -> None:
@@ -636,6 +974,7 @@ async def test_fetch_redirect_uris_metadata_document_oversized(
         text=json.dumps(
             {
                 "client_id": "https://example.com/client",
+                "client_name": "Test client",
                 "redirect_uris": ["https://example.com/callback"],
                 "padding": "x" * 11000,
             }
@@ -652,6 +991,7 @@ async def test_fetch_redirect_uris_metadata_document_exactly_at_cap(
     """Test a document of exactly the read cap is rejected as possibly truncated."""
     document = {
         "client_id": "https://example.com/client",
+        "client_name": "Test client",
         "redirect_uris": ["https://other.com/callback"],
         "padding": "",
     }
@@ -677,6 +1017,7 @@ async def test_fetch_redirect_uris_metadata_document_at_cap_ineligible(
         text=json.dumps(
             {
                 "client_id": "https://example.com/client",
+                "client_name": "Test client",
                 "redirect_uris": [
                     f"https://example.com/callback/{index}" for index in range(400)
                 ],
@@ -701,9 +1042,9 @@ async def test_fetch_redirect_uris_network_error(
     "client_id",
     ["https://home-assistant.io/android", "https://home-assistant.io/iOS"],
 )
-async def test_verify_redirect_uri_android_ios(client_id) -> None:
+async def test_verify_redirect_uri_android_ios(client_id: str) -> None:
     """Test that we verify redirect uri correctly for Android/iOS."""
-    with patch.object(indieauth, "fetch_redirect_uris", return_value=[]):
+    with patch.object(indieauth, "_fetch_client_info", return_value=None):
         assert await indieauth.verify_redirect_uri(
             None, client_id, "homeassistant://auth-callback"
         )

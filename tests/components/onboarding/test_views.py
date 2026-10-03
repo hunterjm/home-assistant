@@ -1,7 +1,7 @@
 """Test the onboarding views."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine, Generator
 from dataclasses import replace
 from http import HTTPStatus
 import os
@@ -13,6 +13,7 @@ import pytest
 
 from homeassistant import bootstrap
 from homeassistant.components import hassio, onboarding
+from homeassistant.components.auth import indieauth
 from homeassistant.components.http import KEY_HASS
 from homeassistant.components.onboarding import DOMAIN, const, views
 from homeassistant.const import EVENT_COMPONENT_LOADED
@@ -38,6 +39,16 @@ from tests.common import (
     register_auth_provider,
 )
 from tests.typing import ClientSessionGenerator
+
+
+@pytest.fixture(autouse=True)
+def mock_client_info() -> Generator[AsyncMock]:
+    """Serve an IndieAuth client document for onboarding tests."""
+    with patch(
+        "homeassistant.components.auth.indieauth._fetch_client_info",
+        return_value=indieauth.ClientInfo([CLIENT_REDIRECT_URI], is_indieauth=True),
+    ) as mock:
+        yield mock
 
 
 @pytest.fixture(autouse=True)
@@ -429,7 +440,7 @@ async def test_onboarding_integration_invalid_redirect_uri(
     client = await hass_client()
 
     with patch(
-        "homeassistant.components.auth.indieauth.fetch_redirect_uris", return_value=[]
+        "homeassistant.components.auth.indieauth._fetch_client_info", return_value=None
     ):
         resp = await client.post(
             "/api/onboarding/integration",
