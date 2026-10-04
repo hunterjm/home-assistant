@@ -72,6 +72,7 @@ an authorization code.
 from http import HTTPStatus
 from ipaddress import ip_address
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlparse
 
 from aiohttp import web
 import probatio
@@ -154,6 +155,8 @@ class WellKnownOAuthInfoView(HomeAssistantView):
         # Add issuer only when we have a valid base URL (RFC 8414 compliance)
         if url_prefix:
             metadata["issuer"] = url_prefix
+            if urlparse(url_prefix).scheme == "https":
+                metadata["authorization_response_iss_parameter_supported"] = True
 
         return self.json(metadata)
 
@@ -332,7 +335,10 @@ class LoginFlowBaseView(HomeAssistantView):
             code_challenge_method=context.get("code_challenge_method"),
         )  # type: ignore[typeddict-item]
 
-        return self.json(result)
+        response = dict(result)
+        if issuer := context.get("issuer"):
+            response["issuer"] = issuer
+        return self.json(response)
 
 
 class LoginFlowIndexView(LoginFlowBaseView):
@@ -394,6 +400,8 @@ class LoginFlowIndexView(LoginFlowBaseView):
             ip_address=ip_address(request.remote),  # type: ignore[arg-type]
             redirect_uri=redirect_uri,
         )
+        if issuer := indieauth.get_authorization_server_issuer(request.app[KEY_HASS]):
+            flow_context["issuer"] = issuer
         if code_challenge and code_challenge_method:
             flow_context["code_challenge"] = code_challenge
             flow_context["code_challenge_method"] = code_challenge_method

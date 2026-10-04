@@ -339,7 +339,10 @@ class IntegrationOnboardingView(_BaseOnboardingStepView):
             auth_code = create_auth_code(
                 hass, data["client_id"], refresh_token.credential
             )
-            return self.json({"auth_code": auth_code})
+            response = {"auth_code": auth_code}
+            if issuer := indieauth.get_authorization_server_issuer(hass):
+                response["issuer"] = issuer
+            return self.json(response)
 
 
 class WaitIntegrationOnboardingView(NoAuthBaseOnboardingView):

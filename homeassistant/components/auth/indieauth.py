@@ -12,12 +12,22 @@ import aiohttp
 import aiohttp.client_exceptions
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.network import NoURLAvailableError, get_url
 from homeassistant.util.network import is_local
 
 _LOGGER = logging.getLogger(__name__)
 
 # We limit reads of a client_id page to the first 10kB.
 MAX_FETCH_BYTES = 10240
+
+
+def get_authorization_server_issuer(hass: HomeAssistant) -> str | None:
+    """Return the trusted HTTPS issuer for an RFC 9207 authorization response."""
+    try:
+        issuer = get_url(hass, require_current_request=True)
+    except NoURLAvailableError:
+        return None
+    return issuer if urlparse(issuer).scheme == "https" else None
 
 
 async def verify_redirect_uri(

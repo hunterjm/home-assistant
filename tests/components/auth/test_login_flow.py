@@ -285,6 +285,48 @@ async def test_login_exist_user(
     assert len(mock_process_success_login.mock_calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("issuer_url", "expected_issuer"),
+    [
+        pytest.param("https://example.com", "https://example.com", id="https"),
+        pytest.param("http://example.com", None, id="http"),
+    ],
+)
+async def test_login_response_issuer(
+    hass: HomeAssistant,
+    aiohttp_client: ClientSessionGenerator,
+    issuer_url: str,
+    expected_issuer: str | None,
+) -> None:
+    """Test a successful login response includes the trusted issuer."""
+    client = await async_setup_auth(hass, aiohttp_client, setup_api=True)
+    with patch(
+        "homeassistant.components.auth.indieauth.get_url",
+        return_value=issuer_url,
+    ):
+        resp = await client.post(
+            "/auth/login_flow",
+            json={
+                "client_id": CLIENT_ID,
+                "handler": ["insecure_example", None],
+                "redirect_uri": CLIENT_REDIRECT_URI,
+            },
+        )
+        step = await resp.json()
+
+        resp = await client.post(
+            f"/auth/login_flow/{step['flow_id']}",
+            json={
+                "client_id": CLIENT_ID,
+                "username": "test-user",
+                "password": "test-pass",
+            },
+        )
+
+    assert resp.status == HTTPStatus.OK
+    assert (await resp.json()).get("issuer") == expected_issuer
+
+
 async def test_login_local_only_user(
     hass: HomeAssistant, aiohttp_client: ClientSessionGenerator
 ) -> None:
@@ -383,7 +425,10 @@ async def test_login_exist_user_ip_changes(
                 "external_url": "https://example.com",
             },
             "https://example.com",
-            {"issuer": "https://example.com"},
+            {
+                "issuer": "https://example.com",
+                "authorization_response_iss_parameter_supported": True,
+            },
         ),
         (
             {
@@ -392,7 +437,10 @@ async def test_login_exist_user_ip_changes(
                 "external_url": "https://other.com",
             },
             "https://example.com",
-            {"issuer": "https://example.com"},
+            {
+                "issuer": "https://example.com",
+                "authorization_response_iss_parameter_supported": True,
+            },
         ),
         (
             {
@@ -411,7 +459,7 @@ async def test_well_known_auth_info(
     aiohttp_client: ClientSessionGenerator,
     config: dict[str, str],
     expected_url_prefix: str,
-    extra_response_data: dict[str, str],
+    extra_response_data: dict[str, str | bool],
 ) -> None:
     """Test well-known OAuth endpoint with different URL configurations."""
     await async_process_ha_core_config(hass, config)
@@ -430,6 +478,23 @@ async def test_well_known_auth_info(
         "response_types_supported": ["code"],
         "service_documentation": "https://developers.home-assistant.io/docs/auth_api",
     }
+
+
+async def test_well_known_auth_info_http_omits_issuer_response_support(
+    hass: HomeAssistant, aiohttp_client: ClientSessionGenerator
+) -> None:
+    """Test local HTTP metadata does not claim RFC 9207 response support."""
+    client = await async_setup_auth(hass, aiohttp_client, setup_api=True)
+    with patch(
+        "homeassistant.components.auth.login_flow.get_url",
+        return_value="http://example.com",
+    ):
+        resp = await client.get("/.well-known/oauth-authorization-server")
+
+    assert resp.status == HTTPStatus.OK
+    metadata = await resp.json()
+    assert metadata["issuer"] == "http://example.com"
+    assert "authorization_response_iss_parameter_supported" not in metadata
 
 
 @pytest.mark.usefixtures("current_request_with_host")  # Has example.com host

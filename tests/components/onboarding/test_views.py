@@ -346,11 +346,20 @@ async def test_onboarding_user_race(
     assert sorted([res1.status, res2.status]) == [HTTPStatus.OK, HTTPStatus.FORBIDDEN]
 
 
+@pytest.mark.parametrize(
+    ("issuer_url", "expected_issuer"),
+    [
+        pytest.param("https://example.com", "https://example.com", id="https"),
+        pytest.param("http://example.com", None, id="http"),
+    ],
+)
 async def test_onboarding_integration(
     hass: HomeAssistant,
     hass_storage: dict[str, Any],
     hass_client: ClientSessionGenerator,
     hass_admin_user: MockUser,
+    issuer_url: str,
+    expected_issuer: str | None,
 ) -> None:
     """Test finishing integration step."""
     mock_storage(hass_storage, {"done": [const.STEP_USER]})
@@ -360,14 +369,18 @@ async def test_onboarding_integration(
 
     client = await hass_client()
 
-    resp = await client.post(
-        "/api/onboarding/integration",
-        json={"client_id": CLIENT_ID, "redirect_uri": CLIENT_REDIRECT_URI},
-    )
+    with patch(
+        "homeassistant.components.auth.indieauth.get_url", return_value=issuer_url
+    ):
+        resp = await client.post(
+            "/api/onboarding/integration",
+            json={"client_id": CLIENT_ID, "redirect_uri": CLIENT_REDIRECT_URI},
+        )
 
     assert resp.status == 200
     data = await resp.json()
     assert "auth_code" in data
+    assert data.get("issuer") == expected_issuer
 
     # Validate refresh token
     resp = await client.post(

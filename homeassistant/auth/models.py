@@ -26,6 +26,7 @@ TOKEN_TYPE_LONG_LIVED_ACCESS_TOKEN = "long_lived_access_token"
 class AuthFlowContext(FlowContext, total=False):
     """Typed context dict for auth flow."""
 
+    issuer: str
     ip_address: IPv4Address | IPv6Address
     redirect_uri: str
     code_challenge: str
