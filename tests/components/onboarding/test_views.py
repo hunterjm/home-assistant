@@ -37,6 +37,7 @@ from tests.common import (
     mock_platform,
     register_auth_provider,
 )
+from tests.components.auth import PKCE_AUTHORIZATION_REQUEST, PKCE_CODE_VERIFIER
 from tests.typing import ClientSessionGenerator
 
 
@@ -346,11 +347,33 @@ async def test_onboarding_user_race(
     assert sorted([res1.status, res2.status]) == [HTTPStatus.OK, HTTPStatus.FORBIDDEN]
 
 
+@pytest.mark.parametrize(
+    ("authorization_data", "token_data"),
+    [
+        pytest.param({}, {}, id="legacy"),
+        pytest.param(
+            PKCE_AUTHORIZATION_REQUEST,
+            {"redirect_uri": CLIENT_REDIRECT_URI, "code_verifier": PKCE_CODE_VERIFIER},
+            id="pkce",
+        ),
+        pytest.param(
+            {**PKCE_AUTHORIZATION_REQUEST, "resource": "https://example.com"},
+            {
+                "redirect_uri": CLIENT_REDIRECT_URI,
+                "code_verifier": PKCE_CODE_VERIFIER,
+                "resource": "https://example.com",
+            },
+            id="resource",
+        ),
+    ],
+)
 async def test_onboarding_integration(
     hass: HomeAssistant,
     hass_storage: dict[str, Any],
     hass_client: ClientSessionGenerator,
     hass_admin_user: MockUser,
+    authorization_data: dict[str, str],
+    token_data: dict[str, str],
 ) -> None:
     """Test finishing integration step."""
     mock_storage(hass_storage, {"done": [const.STEP_USER]})
@@ -360,34 +383,132 @@ async def test_onboarding_integration(
 
     client = await hass_client()
 
-    resp = await client.post(
-        "/api/onboarding/integration",
-        json={"client_id": CLIENT_ID, "redirect_uri": CLIENT_REDIRECT_URI},
-    )
+    with (
+        patch(
+            "homeassistant.components.auth.resource.get_url",
+            return_value="https://example.com",
+        ),
+    ):
+        resp = await client.post(
+            "/api/onboarding/integration",
+            json={
+                "client_id": CLIENT_ID,
+                "redirect_uri": CLIENT_REDIRECT_URI,
+                **authorization_data,
+            },
+        )
 
     assert resp.status == 200
     data = await resp.json()
     assert "auth_code" in data
 
     # Validate refresh token
-    resp = await client.post(
-        "/auth/token",
-        data={
-            "client_id": CLIENT_ID,
-            "grant_type": "authorization_code",
-            "code": data["auth_code"],
-        },
-    )
+    with patch(
+        "homeassistant.components.auth.resource.get_url",
+        return_value="https://example.com",
+    ):
+        resp = await client.post(
+            "/auth/token",
+            data={
+                "client_id": CLIENT_ID,
+                "grant_type": "authorization_code",
+                "code": data["auth_code"],
+                **token_data,
+            },
+        )
 
     assert resp.status == 200
     assert const.STEP_INTEGRATION in hass_storage[const.DOMAIN]["data"]["done"]
     tokens = await resp.json()
 
-    assert hass.auth.async_validate_access_token(tokens["access_token"]) is not None
+    token = hass.auth.async_validate_access_token(tokens["access_token"])
+    assert token is not None
+    assert token.resource == authorization_data.get("resource")
 
     # Onboarding refresh token and new refresh token
     user = await hass.auth.async_get_user(hass_admin_user.id)
     assert len(user.refresh_tokens) == 2, user
+
+
+@pytest.mark.parametrize(
+    "authorization_data",
+    [
+        pytest.param({"resource": "https://other.example"}, id="foreign-resource"),
+        pytest.param({"resource": "https://example.com/api/mcp"}, id="resource-path"),
+        pytest.param({"resource": ""}, id="empty-resource"),
+        pytest.param({"code_challenge": ""}, id="empty-challenge"),
+        pytest.param({"code_challenge_method": "S256"}, id="missing-challenge"),
+        pytest.param(
+            {**PKCE_AUTHORIZATION_REQUEST, "code_challenge_method": "plain"},
+            id="plain-method",
+        ),
+        pytest.param(
+            {**PKCE_AUTHORIZATION_REQUEST, "code_challenge": "short"},
+            id="short-challenge",
+        ),
+        pytest.param(
+            {**PKCE_AUTHORIZATION_REQUEST, "response_type": "token"},
+            id="unsupported-response-type",
+        ),
+    ],
+)
+async def test_onboarding_integration_rejects_invalid_authorization(
+    hass: HomeAssistant,
+    hass_storage: dict[str, Any],
+    hass_client: ClientSessionGenerator,
+    authorization_data: dict[str, str],
+) -> None:
+    """Invalid authorization cannot complete onboarding or issue an unbound code."""
+    mock_storage(hass_storage, {"done": [const.STEP_USER]})
+    assert await async_setup_component(hass, DOMAIN, {})
+    await hass.async_block_till_done()
+    client = await hass_client()
+
+    with patch(
+        "homeassistant.components.auth.resource.get_url",
+        return_value="https://example.com",
+    ):
+        resp = await client.post(
+            "/api/onboarding/integration",
+            json={
+                "client_id": CLIENT_ID,
+                "redirect_uri": CLIENT_REDIRECT_URI,
+                **authorization_data,
+            },
+        )
+
+    assert resp.status == HTTPStatus.BAD_REQUEST
+    assert const.STEP_INTEGRATION not in hass_storage[const.DOMAIN]["data"]["done"]
+
+    resp = await client.post(
+        "/api/onboarding/integration",
+        json={
+            "client_id": CLIENT_ID,
+            "redirect_uri": CLIENT_REDIRECT_URI,
+            **PKCE_AUTHORIZATION_REQUEST,
+        },
+    )
+    assert resp.status == HTTPStatus.OK
+    code = (await resp.json())["auth_code"]
+
+    resp = await client.post(
+        "/auth/token",
+        data={"client_id": CLIENT_ID, "grant_type": "authorization_code", "code": code},
+    )
+    assert resp.status == HTTPStatus.BAD_REQUEST
+    assert (await resp.json())["error"] == "invalid_request"
+
+    resp = await client.post(
+        "/auth/token",
+        data={
+            "client_id": CLIENT_ID,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": CLIENT_REDIRECT_URI,
+            "code_verifier": PKCE_CODE_VERIFIER,
+        },
+    )
+    assert resp.status == HTTPStatus.OK
 
 
 async def test_onboarding_integration_missing_credential(

@@ -12,7 +12,7 @@ import probatio
 from homeassistant.auth.const import GROUP_ID_ADMIN
 from homeassistant.auth.providers.homeassistant import HassAuthProvider, InvalidUsername
 from homeassistant.components import person
-from homeassistant.components.auth import indieauth
+from homeassistant.components.auth import indieauth, resource as auth_resource
 from homeassistant.components.http import KEY_HASS, KEY_HASS_REFRESH_TOKEN_ID
 from homeassistant.components.http.data_validator import RequestDataValidator
 from homeassistant.components.http.view import HomeAssistantView
@@ -300,12 +300,30 @@ class IntegrationOnboardingView(_BaseOnboardingStepView):
             {
                 probatio.Required("client_id"): str,
                 probatio.Required("redirect_uri"): str,
+                probatio.Optional("response_type"): "code",
+                probatio.Optional("code_challenge"): str,
+                probatio.Optional("code_challenge_method"): str,
+                probatio.Optional("resource"): str,
             }
         )
     )
     async def post(self, request: web.Request, data: dict[str, Any]) -> web.Response:
         """Handle token creation."""
         hass = request.app[KEY_HASS]
+        code_challenge = data.get("code_challenge")
+        if not indieauth.is_valid_pkce_request(
+            code_challenge, data.get("code_challenge_method")
+        ):
+            return self.json_message("Invalid PKCE parameters", HTTPStatus.BAD_REQUEST)
+
+        try:
+            resource = auth_resource.normalize_resource(hass, data.get("resource"))
+        except ValueError:
+            return self.json(
+                {"error": "invalid_target", "message": "Invalid resource"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
         if not (refresh_token_id := request.get(KEY_HASS_REFRESH_TOKEN_ID)):
             return self.json_message(
                 "Refresh token not available", HTTPStatus.FORBIDDEN
@@ -337,7 +355,12 @@ class IntegrationOnboardingView(_BaseOnboardingStepView):
             from homeassistant.components.auth import create_auth_code  # noqa: PLC0415
 
             auth_code = create_auth_code(
-                hass, data["client_id"], refresh_token.credential
+                hass,
+                data["client_id"],
+                refresh_token.credential,
+                redirect_uri=data["redirect_uri"],
+                code_challenge=code_challenge,
+                resource=resource,
             )
             return self.json({"auth_code": auth_code})
 
