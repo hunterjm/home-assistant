@@ -587,6 +587,9 @@ async def test_well_known_protected_resource_no_url(
             "Message format incorrect",
             id="unsupported-response-type",
         ),
+        pytest.param(
+            {"type": "unknown"}, "Message format incorrect", id="unknown-code-type"
+        ),
     ],
 )
 async def test_login_flow_pkce_validation(

@@ -142,6 +142,7 @@ import probatio
 from homeassistant.auth import InvalidAuthError
 from homeassistant.auth.models import (
     TOKEN_TYPE_LONG_LIVED_ACCESS_TOKEN,
+    AuthorizationCodeType,
     Credentials,
     RefreshToken,
     User,
@@ -173,6 +174,7 @@ class AuthCodeEntry:
 
     credentials: Credentials
     created: datetime
+    authorization_code_type: AuthorizationCodeType = AuthorizationCodeType.AUTHORIZE
     redirect_uri: str | None = None
     code_challenge: str | None = None
 
@@ -191,6 +193,7 @@ class StoreResultType(Protocol):
         self,
         client_id: str,
         result: Credentials,
+        authorization_code_type: AuthorizationCodeType = AuthorizationCodeType.AUTHORIZE,
         redirect_uri: str | None = None,
         code_challenge: str | None = None,
     ) -> str:
@@ -204,6 +207,7 @@ class RetrieveResultType(Protocol):
         self,
         client_id: str,
         code: str,
+        authorization_code_type: AuthorizationCodeType = AuthorizationCodeType.AUTHORIZE,
         redirect_uri: str | None = None,
         code_verifier: str | None = None,
     ) -> Credentials | AuthorizationCodeValidationError:
@@ -220,6 +224,7 @@ def create_auth_code(
     hass: HomeAssistant,
     client_id: str,
     credential: Credentials,
+    authorization_code_type: AuthorizationCodeType = AuthorizationCodeType.AUTHORIZE,
     redirect_uri: str | None = None,
     code_challenge: str | None = None,
 ) -> str:
@@ -227,6 +232,7 @@ def create_auth_code(
     return hass.data[DATA_STORE](
         client_id,
         credential,
+        authorization_code_type=authorization_code_type,
         redirect_uri=redirect_uri,
         code_challenge=code_challenge,
     )
@@ -509,6 +515,7 @@ class LinkUserView(HomeAssistantView):
         credentials = self._retrieve_credentials(
             data["client_id"],
             data["code"],
+            authorization_code_type=AuthorizationCodeType.LINK_USER,
         )
         if isinstance(credentials, AuthorizationCodeValidationError):
             return self.json_message("Invalid code", status_code=HTTPStatus.BAD_REQUEST)
@@ -534,6 +541,7 @@ def _create_auth_code_store() -> tuple[StoreResultType, RetrieveResultType]:
     def store_result(
         client_id: str,
         result: Credentials,
+        authorization_code_type: AuthorizationCodeType = AuthorizationCodeType.AUTHORIZE,
         redirect_uri: str | None = None,
         code_challenge: str | None = None,
     ) -> str:
@@ -545,6 +553,7 @@ def _create_auth_code_store() -> tuple[StoreResultType, RetrieveResultType]:
         temp_results[(client_id, code)] = AuthCodeEntry(
             credentials=result,
             created=dt_util.utcnow(),
+            authorization_code_type=authorization_code_type,
             redirect_uri=redirect_uri,
             code_challenge=code_challenge,
         )
@@ -554,6 +563,7 @@ def _create_auth_code_store() -> tuple[StoreResultType, RetrieveResultType]:
     def retrieve_result(
         client_id: str,
         code: str,
+        authorization_code_type: AuthorizationCodeType = AuthorizationCodeType.AUTHORIZE,
         redirect_uri: str | None = None,
         code_verifier: str | None = None,
     ) -> Credentials | AuthorizationCodeValidationError:
@@ -570,7 +580,11 @@ def _create_auth_code_store() -> tuple[StoreResultType, RetrieveResultType]:
             del temp_results[key]
             return AuthorizationCodeValidationError("invalid_grant", "Invalid code")
 
+        if entry.authorization_code_type is not authorization_code_type:
+            return AuthorizationCodeValidationError("invalid_grant", "Invalid code")
         if entry.code_challenge is not None:
+            if authorization_code_type is AuthorizationCodeType.LINK_USER:
+                return AuthorizationCodeValidationError("invalid_grant", "Invalid code")
             if not code_verifier:
                 return AuthorizationCodeValidationError(
                     "invalid_request", "Code verifier required"

@@ -78,7 +78,11 @@ import probatio
 
 from homeassistant import data_entry_flow
 from homeassistant.auth import AuthManagerFlowManager, InvalidAuthError
-from homeassistant.auth.models import AuthFlowContext, AuthFlowResult
+from homeassistant.auth.models import (
+    AuthFlowContext,
+    AuthFlowResult,
+    AuthorizationCodeType,
+)
 from homeassistant.components import onboarding
 from homeassistant.components.http import KEY_HASS
 from homeassistant.components.http.auth import async_user_not_allowed_do_auth
@@ -330,6 +334,7 @@ class LoginFlowBaseView(HomeAssistantView):
         response["result"] = self._store_result(
             client_id,
             result_obj,
+            authorization_code_type=context["authorization_code_type"],
             redirect_uri=context["redirect_uri"],
             code_challenge=context.get("code_challenge"),
         )
@@ -362,8 +367,8 @@ class LoginFlowIndexView(LoginFlowBaseView):
                 probatio.Optional("state"): str,
                 probatio.Optional("code_challenge_method"): str,
                 probatio.Optional(
-                    "type", default="authorize"
-                ): str,  # not used, kept for backwards compatibility
+                    "type", default=AuthorizationCodeType.AUTHORIZE
+                ): probatio.Coerce(AuthorizationCodeType),
             }
         )
     )
@@ -385,6 +390,7 @@ class LoginFlowIndexView(LoginFlowBaseView):
         handler: tuple[str, str] = tuple(data["handler"])
         context = AuthFlowContext(
             client_id=client_id,
+            authorization_code_type=data["type"],
             ip_address=ip_address(request.remote),  # type: ignore[arg-type]
             redirect_uri=redirect_uri,
         )

@@ -18,6 +18,7 @@ async def async_get_code(
     hass: HomeAssistant,
     aiohttp_client: ClientSessionGenerator,
     *,
+    code_type: str = "link_user",
     authorization_data: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Return authorization code for link user tests."""
@@ -48,7 +49,7 @@ async def async_get_code(
         "client_id": CLIENT_ID,
         "handler": ["insecure_example", "2nd auth"],
         "redirect_uri": CLIENT_REDIRECT_URI,
-        "type": "link_user",
+        "type": code_type,
         **(authorization_data or {}),
     }
 
@@ -96,6 +97,59 @@ async def test_link_user(
 
     assert resp.status == HTTPStatus.OK
     assert len(info["user"].credentials) == 1
+
+
+async def test_link_user_rejects_authorization_code_without_consuming_it(
+    hass: HomeAssistant, aiohttp_client: ClientSessionGenerator
+) -> None:
+    """Test an authorization code cannot be used to link a user."""
+    info = await async_get_code(hass, aiohttp_client, code_type="authorize")
+    client = info["client"]
+    code = info["code"]
+
+    resp = await client.post(
+        "/auth/link_user",
+        json={"client_id": CLIENT_ID, "code": code},
+        headers={"authorization": f"Bearer {info['access_token']}"},
+    )
+    assert resp.status == HTTPStatus.BAD_REQUEST
+
+    resp = await client.post(
+        "/auth/token",
+        data={
+            "client_id": CLIENT_ID,
+            "grant_type": "authorization_code",
+            "code": code,
+        },
+    )
+    assert resp.status == HTTPStatus.OK
+
+
+async def test_token_endpoint_rejects_link_code_without_consuming_it(
+    hass: HomeAssistant, aiohttp_client: ClientSessionGenerator
+) -> None:
+    """Test a link code cannot be exchanged for tokens."""
+    info = await async_get_code(hass, aiohttp_client)
+    client = info["client"]
+    code = info["code"]
+
+    resp = await client.post(
+        "/auth/token",
+        data={
+            "client_id": CLIENT_ID,
+            "grant_type": "authorization_code",
+            "code": code,
+        },
+    )
+    assert resp.status == HTTPStatus.BAD_REQUEST
+    assert (await resp.json())["error"] == "invalid_grant"
+
+    resp = await client.post(
+        "/auth/link_user",
+        json={"client_id": CLIENT_ID, "code": code},
+        headers={"authorization": f"Bearer {info['access_token']}"},
+    )
+    assert resp.status == HTTPStatus.OK
 
 
 @pytest.mark.parametrize(

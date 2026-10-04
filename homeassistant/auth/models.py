@@ -1,6 +1,7 @@
 """Auth models."""
 
 from datetime import datetime, timedelta
+from enum import StrEnum
 from ipaddress import IPv4Address, IPv6Address
 import secrets
 from typing import Any, NamedTuple
@@ -23,10 +24,18 @@ TOKEN_TYPE_SYSTEM = "system"
 TOKEN_TYPE_LONG_LIVED_ACCESS_TOKEN = "long_lived_access_token"
 
 
+class AuthorizationCodeType(StrEnum):
+    """Purpose of an authorization code."""
+
+    AUTHORIZE = "authorize"
+    LINK_USER = "link_user"
+
+
 class AuthFlowContext(FlowContext, total=False):
     """Typed context dict for auth flow."""
 
     client_id: str
+    authorization_code_type: AuthorizationCodeType
     code_challenge: str
     ip_address: IPv4Address | IPv6Address
     redirect_uri: str
