@@ -121,6 +121,7 @@ class WellKnownOAuthInfoView(HomeAssistantView):
     """View to host the OAuth2 information."""
 
     requires_auth = False
+    cors_allowed = True
     url = "/.well-known/oauth-authorization-server"
     name = "well-known/oauth-authorization-server"
 
@@ -138,6 +139,9 @@ class WellKnownOAuthInfoView(HomeAssistantView):
             "authorization_endpoint": f"{url_prefix}/auth/authorize",
             "token_endpoint": f"{url_prefix}/auth/token",
             "revocation_endpoint": f"{url_prefix}/auth/revoke",
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "token_endpoint_auth_methods_supported": ["none"],
+            "revocation_endpoint_auth_methods_supported": ["none"],
             # Home Assistant accepts URL-based client_ids via IndieAuth without
             # prior registration, and discovers allowed redirect URIs from link
             # tags or a Client ID Metadata Document served at the client_id URL.
@@ -162,6 +166,7 @@ class WellKnownProtectedResourceView(HomeAssistantView):
     """View to host the OAuth2 Protected Resource Metadata per RFC9728."""
 
     requires_auth = False
+    cors_allowed = True
     url = "/.well-known/oauth-protected-resource"
     name = "well-known/oauth-protected-resource"
 
@@ -308,8 +313,10 @@ class LoginFlowBaseView(HomeAssistantView):
         ):
             return self.json_message("Invalid redirect URI", HTTPStatus.FORBIDDEN)
 
-        context = result["context"]
-        result_obj = result["result"]
+        result.pop("data")
+        context = result.pop("context")
+
+        result_obj = result.pop("result")
 
         # Result can be None if credential was never linked to a user before.
         user = await hass.auth.async_get_user_by_credentials(result_obj)
@@ -322,19 +329,16 @@ class LoginFlowBaseView(HomeAssistantView):
             )
 
         process_success_login(request)
-        response: dict[str, Any] = {
-            key: value
-            for key, value in result.items()
-            if key not in ("data", "context")
-        }
-        response["result"] = self._store_result(
+        # We overwrite the Credentials object with the string code to retrieve it.
+        result["result"] = self._store_result(
             client_id,
             result_obj,
             redirect_uri=context["redirect_uri"],
             code_challenge=context.get("code_challenge"),
-        )
+            code_challenge_method=context.get("code_challenge_method"),
+        )  # type: ignore[typeddict-item]
 
-        return self.json(response)
+        return self.json(result)
 
 
 class LoginFlowIndexView(LoginFlowBaseView):
@@ -357,10 +361,12 @@ class LoginFlowIndexView(LoginFlowBaseView):
                     probatio.Coerce(tuple),
                 ),
                 probatio.Required("redirect_uri"): str,
-                probatio.Optional("code_challenge"): str,
-                probatio.Optional("response_type"): "code",
-                probatio.Optional("state"): str,
+                # S256 challenges are always 43 unpadded base64url characters.
+                probatio.Optional("code_challenge"): probatio.Match(
+                    r"^[A-Za-z0-9_-]{43}\Z"
+                ),
                 probatio.Optional("code_challenge_method"): str,
+                probatio.Optional("response_type"): str,
                 probatio.Optional(
                     "type", default="authorize"
                 ): str,  # not used, kept for backwards compatibility
@@ -376,25 +382,39 @@ class LoginFlowIndexView(LoginFlowBaseView):
         if not indieauth.verify_client_id(client_id):
             return self.json_message("Invalid client id", HTTPStatus.BAD_REQUEST)
 
+        if data.get("response_type", "code") != "code":
+            return self.json_message(
+                "Response type not supported", HTTPStatus.BAD_REQUEST
+            )
+
         code_challenge = data.get("code_challenge")
-        if not indieauth.is_valid_pkce_request(
-            code_challenge, data.get("code_challenge_method")
-        ):
-            return self.json_message("Invalid PKCE parameters", HTTPStatus.BAD_REQUEST)
+        code_challenge_method = data.get("code_challenge_method")
+        if code_challenge_method is not None and not code_challenge:
+            return self.json_message(
+                "code_challenge required when code_challenge_method is provided",
+                HTTPStatus.BAD_REQUEST,
+            )
+        # RFC 7636 4.3: the method defaults to "plain", which is not supported.
+        if code_challenge is not None and code_challenge_method != "S256":
+            return self.json_message(
+                "Transform algorithm not supported", HTTPStatus.BAD_REQUEST
+            )
 
         handler: tuple[str, str] = tuple(data["handler"])
-        context = AuthFlowContext(
+
+        flow_context = AuthFlowContext(
             client_id=client_id,
             ip_address=ip_address(request.remote),  # type: ignore[arg-type]
             redirect_uri=redirect_uri,
         )
-        if code_challenge is not None:
-            context["code_challenge"] = code_challenge
+        if code_challenge and code_challenge_method:
+            flow_context["code_challenge"] = code_challenge
+            flow_context["code_challenge_method"] = code_challenge_method
 
         try:
             result = await self._flow_mgr.async_init(
                 handler,
-                context=context,
+                context=flow_context,
             )
         except data_entry_flow.UnknownHandler:
             return self.json_message("Invalid handler specified", HTTPStatus.NOT_FOUND)

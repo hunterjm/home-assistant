@@ -27,9 +27,10 @@ class AuthFlowContext(FlowContext, total=False):
     """Typed context dict for auth flow."""
 
     client_id: str
-    code_challenge: str
     ip_address: IPv4Address | IPv6Address
     redirect_uri: str
+    code_challenge: str
+    code_challenge_method: str
 
 
 class AuthFlowResult(FlowResult[AuthFlowContext, tuple[str, str]], total=False):
