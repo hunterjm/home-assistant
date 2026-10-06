@@ -37,7 +37,6 @@ from tests.common import (
     mock_platform,
     register_auth_provider,
 )
-from tests.components.auth import PKCE_AUTHORIZATION_REQUEST, PKCE_CODE_VERIFIER
 from tests.typing import ClientSessionGenerator
 
 
@@ -111,6 +110,14 @@ def mock_default_integrations():
         ),
     ):
         yield
+
+
+PKCE_CODE_VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+PKCE_AUTHORIZATION_REQUEST = {
+    "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+    "code_challenge_method": "S256",
+    "response_type": "code",
+}
 
 
 async def test_onboarding_progress(
@@ -350,7 +357,8 @@ async def test_onboarding_user_race(
 @pytest.mark.parametrize(
     ("authorization_data", "token_data"),
     [
-        pytest.param({}, {}, id="legacy"),
+        pytest.param({}, {}, id="without-redirect-uri"),
+        pytest.param({}, {"redirect_uri": CLIENT_REDIRECT_URI}, id="with-redirect-uri"),
         pytest.param(
             PKCE_AUTHORIZATION_REQUEST,
             {"redirect_uri": CLIENT_REDIRECT_URI, "code_verifier": PKCE_CODE_VERIFIER},
@@ -383,11 +391,9 @@ async def test_onboarding_integration(
 
     client = await hass_client()
 
-    with (
-        patch(
-            "homeassistant.components.auth.resource.get_url",
-            return_value="https://example.com",
-        ),
+    with patch(
+        "homeassistant.components.auth.resource.get_url",
+        return_value="https://example.com",
     ):
         resp = await client.post(
             "/api/onboarding/integration",

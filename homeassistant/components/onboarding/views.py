@@ -300,8 +300,10 @@ class IntegrationOnboardingView(_BaseOnboardingStepView):
             {
                 probatio.Required("client_id"): str,
                 probatio.Required("redirect_uri"): str,
-                probatio.Optional("response_type"): "code",
-                probatio.Optional("code_challenge"): str,
+                probatio.Optional("response_type"): str,
+                probatio.Optional("code_challenge"): probatio.Match(
+                    r"^[A-Za-z0-9_-]{43}\Z"
+                ),
                 probatio.Optional("code_challenge_method"): str,
                 probatio.Optional("resource"): str,
             }
@@ -310,11 +312,23 @@ class IntegrationOnboardingView(_BaseOnboardingStepView):
     async def post(self, request: web.Request, data: dict[str, Any]) -> web.Response:
         """Handle token creation."""
         hass = request.app[KEY_HASS]
+        if data.get("response_type", "code") != "code":
+            return self.json_message(
+                "Response type not supported", HTTPStatus.BAD_REQUEST
+            )
+
         code_challenge = data.get("code_challenge")
-        if not indieauth.is_valid_pkce_request(
-            code_challenge, data.get("code_challenge_method")
-        ):
-            return self.json_message("Invalid PKCE parameters", HTTPStatus.BAD_REQUEST)
+        code_challenge_method = data.get("code_challenge_method")
+        if code_challenge_method is not None and not code_challenge:
+            return self.json_message(
+                "code_challenge required when code_challenge_method is provided",
+                HTTPStatus.BAD_REQUEST,
+            )
+        # RFC 7636 4.3: the method defaults to "plain", which is not supported.
+        if code_challenge is not None and code_challenge_method != "S256":
+            return self.json_message(
+                "Transform algorithm not supported", HTTPStatus.BAD_REQUEST
+            )
 
         try:
             resource = auth_resource.normalize_resource(hass, data.get("resource"))
@@ -360,6 +374,7 @@ class IntegrationOnboardingView(_BaseOnboardingStepView):
                 refresh_token.credential,
                 redirect_uri=data["redirect_uri"],
                 code_challenge=code_challenge,
+                code_challenge_method=code_challenge_method,
                 resource=resource,
             )
             return self.json({"auth_code": auth_code})

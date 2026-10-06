@@ -27,9 +27,10 @@ class AuthFlowContext(FlowContext, total=False):
     """Typed context dict for auth flow."""
 
     client_id: str
-    code_challenge: str
     ip_address: IPv4Address | IPv6Address
     redirect_uri: str
+    code_challenge: str
+    code_challenge_method: str
     resource: str
 
 
@@ -130,7 +131,7 @@ class RefreshToken:
     credential: Credentials | None = attr.ib(default=None)
 
     version: str | None = attr.ib(default=__version__)
-    resource: str | None = attr.ib(default=None, kw_only=True)
+    resource: str | None = attr.ib(default=None)
 
 
 @attr.s(slots=True)

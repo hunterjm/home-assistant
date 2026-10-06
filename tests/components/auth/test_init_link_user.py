@@ -8,7 +8,7 @@ import pytest
 
 from homeassistant.core import HomeAssistant
 
-from . import PKCE_AUTHORIZATION_REQUEST, async_setup_auth
+from . import async_setup_auth
 
 from tests.common import CLIENT_ID, CLIENT_REDIRECT_URI
 from tests.typing import ClientSessionGenerator
@@ -17,8 +17,8 @@ from tests.typing import ClientSessionGenerator
 async def async_get_code(
     hass: HomeAssistant,
     aiohttp_client: ClientSessionGenerator,
-    *,
-    authorization_data: dict[str, str] | None = None,
+    code_challenge: str | None = None,
+    code_challenge_method: str | None = None,
 ) -> dict[str, Any]:
     """Return authorization code for link user tests."""
     config = [
@@ -44,18 +44,18 @@ async def async_get_code(
     access_token = hass.auth.async_create_access_token(refresh_token)
 
     # Now authenticate with the 2nd flow
-    login_data = {
+    flow_payload: dict[str, Any] = {
         "client_id": CLIENT_ID,
         "handler": ["insecure_example", "2nd auth"],
         "redirect_uri": CLIENT_REDIRECT_URI,
         "type": "link_user",
-        **(authorization_data or {}),
     }
+    if code_challenge is not None:
+        flow_payload["code_challenge"] = code_challenge
+    if code_challenge_method is not None:
+        flow_payload["code_challenge_method"] = code_challenge_method
 
-    resp = await client.post(
-        "/auth/login_flow",
-        json=login_data,
-    )
+    resp = await client.post("/auth/login_flow", json=flow_payload)
     assert resp.status == HTTPStatus.OK
     step = await resp.json()
 
@@ -96,30 +96,6 @@ async def test_link_user(
 
     assert resp.status == HTTPStatus.OK
     assert len(info["user"].credentials) == 1
-
-
-@pytest.mark.parametrize(
-    "request_data",
-    [
-        pytest.param({"client_id": CLIENT_ID}, id="missing-code"),
-        pytest.param({"code": "code"}, id="missing-client-id"),
-    ],
-)
-async def test_link_user_requires_code_and_client_id(
-    hass: HomeAssistant,
-    aiohttp_client: ClientSessionGenerator,
-    request_data: dict[str, str],
-) -> None:
-    """Test missing fields return a validation error instead of a server error."""
-    info = await async_get_code(hass, aiohttp_client)
-
-    resp = await info["client"].post(
-        "/auth/link_user",
-        json=request_data,
-        headers={"authorization": f"Bearer {info['access_token']}"},
-    )
-
-    assert resp.status == HTTPStatus.BAD_REQUEST
 
 
 async def test_link_user_invalid_client_id(
@@ -234,7 +210,8 @@ async def test_link_user_rejects_pkce_code(
     info = await async_get_code(
         hass,
         aiohttp_client,
-        authorization_data=PKCE_AUTHORIZATION_REQUEST,
+        code_challenge="E9Melhoa2OwvFrGMTJguCH5rtx647b100_bCcqqqqqq",
+        code_challenge_method="S256",
     )
     client = info["client"]
     code = info["code"]
@@ -248,3 +225,27 @@ async def test_link_user_rejects_pkce_code(
     assert resp.status == HTTPStatus.BAD_REQUEST
     assert (await resp.json())["message"] == "Invalid code"
     assert len(info["user"].credentials) == 0
+
+
+@pytest.mark.parametrize(
+    "request_data",
+    [
+        pytest.param({"client_id": CLIENT_ID}, id="missing-code"),
+        pytest.param({"code": "code"}, id="missing-client-id"),
+    ],
+)
+async def test_link_user_requires_code_and_client_id(
+    hass: HomeAssistant,
+    aiohttp_client: ClientSessionGenerator,
+    request_data: dict[str, str],
+) -> None:
+    """Test missing fields return a validation error instead of a server error."""
+    info = await async_get_code(hass, aiohttp_client)
+
+    resp = await info["client"].post(
+        "/auth/link_user",
+        json=request_data,
+        headers={"authorization": f"Bearer {info['access_token']}"},
+    )
+
+    assert resp.status == HTTPStatus.BAD_REQUEST
