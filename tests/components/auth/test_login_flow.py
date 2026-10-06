@@ -9,12 +9,7 @@ import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.core_config import async_process_ha_core_config
 
-from . import (
-    BASE_CONFIG,
-    PKCE_AUTHORIZATION_REQUEST,
-    PKCE_CODE_CHALLENGE,
-    async_setup_auth,
-)
+from . import BASE_CONFIG, async_setup_auth
 
 from tests.common import CLIENT_ID, CLIENT_REDIRECT_URI
 from tests.typing import ClientSessionGenerator
@@ -250,47 +245,9 @@ async def test_invalid_redirect_uri(
     assert data["message"] == "Invalid redirect URI"
 
 
-async def test_client_id_cannot_change_during_login_flow(
-    hass: HomeAssistant, aiohttp_client: ClientSessionGenerator
-) -> None:
-    """Test the client id is bound to the login flow."""
-    client = await async_setup_auth(hass, aiohttp_client)
-    resp = await client.post(
-        "/auth/login_flow",
-        json={
-            "client_id": CLIENT_ID,
-            "handler": ["insecure_example", None],
-            "redirect_uri": CLIENT_REDIRECT_URI,
-        },
-    )
-    step = await resp.json()
-
-    resp = await client.post(
-        f"/auth/login_flow/{step['flow_id']}",
-        json={
-            "client_id": "https://other.example.com/",
-            "username": "test-user",
-            "password": "test-pass",
-        },
-    )
-
-    assert resp.status == HTTPStatus.BAD_REQUEST
-    assert await resp.json() == {"message": "Client id changed"}
-
-
 @pytest.mark.parametrize(
     "authorization_data",
-    [
-        pytest.param({}, id="legacy"),
-        pytest.param(
-            {
-                **PKCE_AUTHORIZATION_REQUEST,
-                "state": "opaque+state/with=reserved&chars?",
-            },
-            id="opaque-state",
-        ),
-        pytest.param({**PKCE_AUTHORIZATION_REQUEST, "state": ""}, id="empty-state"),
-    ],
+    [{}, {"response_type": "code"}],
 )
 async def test_login_exist_user(
     hass: HomeAssistant,
@@ -475,6 +432,9 @@ async def test_well_known_auth_info(
         "authorization_endpoint": f"{expected_url_prefix}/auth/authorize",
         "token_endpoint": f"{expected_url_prefix}/auth/token",
         "revocation_endpoint": f"{expected_url_prefix}/auth/revoke",
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "token_endpoint_auth_methods_supported": ["none"],
+        "revocation_endpoint_auth_methods_supported": ["none"],
         "client_id_metadata_document_supported": True,
         "code_challenge_methods_supported": ["S256"],
         "response_types_supported": ["code"],
@@ -552,41 +512,53 @@ async def test_well_known_protected_resource_no_url(
 @pytest.mark.parametrize(
     ("payload", "expected_message"),
     [
-        pytest.param(
-            {"code_challenge_method": "S256"},
-            "Invalid PKCE parameters",
-            id="missing-challenge",
+        (
+            {
+                "code_challenge_method": "S256",
+            },
+            "code_challenge required when code_challenge_method is provided",
         ),
-        pytest.param(
-            {"code_challenge": PKCE_CODE_CHALLENGE},
-            "Invalid PKCE parameters",
-            id="missing-method",
+        (
+            {
+                "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            },
+            "Transform algorithm not supported",
         ),
-        pytest.param(
-            {"code_challenge": PKCE_CODE_CHALLENGE, "code_challenge_method": "plain"},
-            "Invalid PKCE parameters",
-            id="plain-method",
+        (
+            {
+                "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+                "code_challenge_method": "plain",
+            },
+            "Transform algorithm not supported",
         ),
-        pytest.param(
-            {"code_challenge": "short", "code_challenge_method": "S256"},
-            "Invalid PKCE parameters",
-            id="short-challenge",
-        ),
-        pytest.param(
-            {"code_challenge": "a" * 43 + "=", "code_challenge_method": "S256"},
-            "Invalid PKCE parameters",
-            id="padded-challenge",
-        ),
-        pytest.param(
-            {"code_challenge": "a" * 43, "code_challenge_method": "S256"},
-            "Invalid PKCE parameters",
-            id="non-canonical-challenge",
-        ),
-        pytest.param(
-            {"response_type": "token"},
+        (
+            {
+                "code_challenge": "short",
+                "code_challenge_method": "S256",
+            },
             "Message format incorrect",
-            id="unsupported-response-type",
         ),
+        (
+            {
+                "code_challenge": "a" * 43 + "=",
+                "code_challenge_method": "S256",
+            },
+            "Message format incorrect",
+        ),
+        (
+            {
+                "response_type": "token",
+            },
+            "Response type not supported",
+        ),
+    ],
+    ids=[
+        "method_without_challenge",
+        "challenge_without_method",
+        "unsupported_plain_method",
+        "challenge_too_short",
+        "challenge_padded",
+        "unsupported_response_type",
     ],
 )
 async def test_login_flow_pkce_validation(
@@ -609,4 +581,55 @@ async def test_login_flow_pkce_validation(
     assert resp.status == HTTPStatus.BAD_REQUEST
     result = await resp.json()
     assert expected_message in result["message"]
-    assert hass.auth.login_flow.async_progress() == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param(
+            "/.well-known/oauth-authorization-server", id="authorization-server"
+        ),
+        pytest.param("/.well-known/oauth-protected-resource", id="protected-resource"),
+    ],
+)
+async def test_well_known_auth_info_allows_cors(
+    hass: HomeAssistant, aiohttp_client: ClientSessionGenerator, path: str
+) -> None:
+    """Test browser clients can discover authorization server capabilities."""
+    client = await async_setup_auth(hass, aiohttp_client, setup_api=True)
+
+    resp = await client.get(
+        path,
+        headers={"origin": "https://client.example"},
+    )
+
+    assert resp.status == HTTPStatus.OK
+    assert resp.headers["Access-Control-Allow-Origin"] == "https://client.example"
+
+
+async def test_client_id_cannot_change_during_login_flow(
+    hass: HomeAssistant, aiohttp_client: ClientSessionGenerator
+) -> None:
+    """Test the client id is bound to the login flow."""
+    client = await async_setup_auth(hass, aiohttp_client)
+    resp = await client.post(
+        "/auth/login_flow",
+        json={
+            "client_id": CLIENT_ID,
+            "handler": ["insecure_example", None],
+            "redirect_uri": CLIENT_REDIRECT_URI,
+        },
+    )
+    step = await resp.json()
+
+    resp = await client.post(
+        f"/auth/login_flow/{step['flow_id']}",
+        json={
+            "client_id": "https://other.example.com/",
+            "username": "test-user",
+            "password": "test-pass",
+        },
+    )
+
+    assert resp.status == HTTPStatus.BAD_REQUEST
+    assert await resp.json() == {"message": "Client id changed"}

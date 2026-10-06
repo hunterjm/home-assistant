@@ -132,6 +132,7 @@ import hashlib
 import hmac
 from http import HTTPStatus
 from logging import getLogger
+import re
 from typing import Any, NamedTuple, Protocol, cast
 import uuid
 
@@ -168,14 +169,15 @@ from .resource import normalize_resource
 DOMAIN = "auth"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class AuthCodeEntry:
-    """Authorization code bindings, with S256 used for any PKCE challenge."""
+    """Entry stored in the auth code store."""
 
-    credentials: Credentials
     created: datetime
-    redirect_uri: str | None = None
+    credentials: Credentials
     code_challenge: str | None = None
+    code_challenge_method: str | None = None
+    redirect_uri: str | None = None
     resource: str | None = None
 
 
@@ -187,17 +189,18 @@ class AuthorizationCodeValidationError(NamedTuple):
 
 
 class StoreResultType(Protocol):
-    """Callable that stores an authorization code."""
+    """Protocol for storing auth flow results."""
 
     def __call__(
         self,
         client_id: str,
         result: Credentials,
-        redirect_uri: str | None = None,
         code_challenge: str | None = None,
+        code_challenge_method: str | None = None,
+        redirect_uri: str | None = None,
         resource: str | None = None,
     ) -> str:
-        """Store an authorization code."""
+        """Store flow result and return a code to retrieve it."""
 
 
 class RetrieveResultType(Protocol):
@@ -225,16 +228,11 @@ def create_auth_code(
     client_id: str,
     credential: Credentials,
     redirect_uri: str | None = None,
-    code_challenge: str | None = None,
     resource: str | None = None,
 ) -> str:
     """Create an authorization code to fetch tokens."""
     return hass.data[DATA_STORE](
-        client_id,
-        credential,
-        redirect_uri=redirect_uri,
-        code_challenge=code_challenge,
-        resource=resource,
+        client_id, credential, redirect_uri=redirect_uri, resource=resource
     )
 
 
@@ -292,9 +290,13 @@ class RevokeTokenView(HomeAssistantView):
         return web.Response(status=HTTPStatus.OK)
 
 
+# RFC 7636 4.1: code_verifier is 43-128 unreserved characters.
+_CODE_VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}\Z")
+
+
 def _verify_code_verifier(code_verifier: str, code_challenge: str) -> bool:
     """Verify code_verifier against code_challenge per RFC 7636 (S256)."""
-    if indieauth.PKCE_CODE_VERIFIER_PATTERN.fullmatch(code_verifier) is None:
+    if not _CODE_VERIFIER_RE.match(code_verifier):
         return False
     hashed = hashlib.sha256(code_verifier.encode("ascii")).digest()
     computed_challenge = base64.urlsafe_b64encode(hashed).decode("ascii").rstrip("=")
@@ -319,6 +321,7 @@ class TokenView(HomeAssistantView):
         hass = request.app[KEY_HASS]
         data = cast(MultiDictProxy[str], await request.post())
 
+        # RFC 6749 3.2: parameters must not be included more than once.
         if len(data) != len(set(data)) or any(
             not isinstance(value, str) for value in data.values()
         ):
@@ -530,10 +533,7 @@ class LinkUserView(HomeAssistantView):
         hass = request.app[KEY_HASS]
         user: User = request["hass_user"]
 
-        credentials = self._retrieve_credentials(
-            data["client_id"],
-            data["code"],
-        )
+        credentials = self._retrieve_credentials(data["client_id"], data["code"])
         if isinstance(credentials, AuthorizationCodeValidationError):
             return self.json_message("Invalid code", status_code=HTTPStatus.BAD_REQUEST)
 
@@ -558,8 +558,9 @@ def _create_auth_code_store() -> tuple[StoreResultType, RetrieveResultType]:
     def store_result(
         client_id: str,
         result: Credentials,
-        redirect_uri: str | None = None,
         code_challenge: str | None = None,
+        code_challenge_method: str | None = None,
+        redirect_uri: str | None = None,
         resource: str | None = None,
     ) -> str:
         """Store flow result and return a code to retrieve it."""
@@ -568,11 +569,12 @@ def _create_auth_code_store() -> tuple[StoreResultType, RetrieveResultType]:
 
         code = uuid.uuid4().hex
         temp_results[(client_id, code)] = AuthCodeEntry(
-            credentials=result,
             created=dt_util.utcnow(),
+            credentials=result,
             redirect_uri=redirect_uri,
-            code_challenge=code_challenge,
             resource=resource,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method,
         )
         return code
 

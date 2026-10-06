@@ -14,7 +14,7 @@ from homeassistant.components.auth.resource import normalize_resource
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.network import NoURLAvailableError
 
-from . import PKCE_AUTHORIZATION_REQUEST, async_setup_auth
+from . import async_setup_auth
 
 from tests.common import CLIENT_ID, CLIENT_REDIRECT_URI
 from tests.typing import ClientSessionGenerator
@@ -187,7 +187,6 @@ async def test_login_flow_binds_resource(
                 "redirect_uri": CLIENT_REDIRECT_URI,
                 "handler": ["insecure_example", None],
                 "resource": f"{RESOURCE}/",
-                **PKCE_AUTHORIZATION_REQUEST,
             },
         )
     assert response.status == HTTPStatus.OK
@@ -220,7 +219,6 @@ async def test_login_flow_rejects_invalid_resource(
                 "handler": ["insecure_example", None],
                 "resource": resource,
                 "type": authorization_code_type,
-                **PKCE_AUTHORIZATION_REQUEST,
             },
         )
     assert response.status == HTTPStatus.BAD_REQUEST

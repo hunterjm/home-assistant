@@ -137,7 +137,10 @@ async def test_cimd_pkce_mcp_authorization(
 
         response = await client.post(
             "/auth/login_flow",
-            json={**url.query, "handler": ["insecure_example", None]},
+            json={
+                **url.without_query_params("state").query,
+                "handler": ["insecure_example", None],
+            },
         )
         assert response.status == HTTPStatus.OK
         flow = await response.json()
