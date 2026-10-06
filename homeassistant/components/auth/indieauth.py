@@ -6,7 +6,7 @@ from ipaddress import IPv6Address, ip_address
 import json
 import logging
 import socket
-from typing import NamedTuple, override
+from typing import override
 from urllib.parse import ParseResult, urljoin, urlparse
 
 import aiohttp
@@ -135,13 +135,6 @@ def _is_valid_metadata_redirect_uri(redirect_uri: str) -> bool:
     return bool(parts.scheme) and "#" not in redirect_uri
 
 
-class ClientInfo(NamedTuple):
-    """A client's registered redirect URIs and discovery format."""
-
-    redirect_uris: list[str]
-    is_indieauth: bool = False
-
-
 def _is_public_address(host: str) -> bool:
     """Return whether a numeric address is safe for public client discovery."""
     address = ip_address(host)
@@ -173,21 +166,14 @@ class ClientMetadataResolver(ThreadedResolver):
 
 async def fetch_redirect_uris(hass: HomeAssistant, url: str) -> list[str]:
     """Find redirect URIs advertised by an IndieAuth page or client metadata."""
-    if (client_info := await _fetch_client_info(url)) is None:
-        return []
-    return client_info.redirect_uris
-
-
-async def _fetch_client_info(url: str) -> ClientInfo | None:
-    """Fetch client metadata, preserving legacy HTTP IndieAuth discovery."""
     try:
         parts = _parse_client_id(url)
     except ValueError:
-        return None
+        return []
     public_only = parts.scheme == "https"
     if public_only:
         if "#" in url or any(ord(character) <= 32 for character in url):
-            return None
+            return []
         hostname = parts.hostname
         assert hostname is not None
         try:
@@ -196,7 +182,7 @@ async def _fetch_client_info(url: str) -> ClientInfo | None:
             pass
         else:
             if not is_public:
-                return None
+                return []
 
     body: bytes = b""
     content_type = ""
@@ -216,7 +202,7 @@ async def _fetch_client_info(url: str) -> ClientInfo | None:
             ) as resp,
         ):
             if resp.status != HTTPStatus.OK:
-                return None
+                return []
             content_type = (
                 resp.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
             )
@@ -228,39 +214,35 @@ async def _fetch_client_info(url: str) -> ClientInfo | None:
 
     except TimeoutError:
         _LOGGER.error("Timeout while looking up redirect_uri %s", url)
-        return None
+        return []
     except aiohttp.client_exceptions.ClientSSLError:
         _LOGGER.error("SSL error while looking up redirect_uri %s", url)
-        return None
+        return []
     except aiohttp.client_exceptions.ClientOSError as ex:
         _LOGGER.error("OS error while looking up redirect_uri %s: %s", url, ex.strerror)
-        return None
+        return []
     except aiohttp.client_exceptions.ClientConnectionError:
         _LOGGER.error(
             "Low level connection error while looking up redirect_uri %s", url
         )
-        return None
+        return []
     except aiohttp.client_exceptions.ClientError:
         _LOGGER.error("Unknown error while looking up redirect_uri %s", url)
-        return None
+        return []
 
     # JSON strings can contain link tags; never interpret those as IndieAuth HTML.
     if content_type == "application/json" or content_type.endswith("+json"):
         if content_type != "application/json" and not (
             content_type.startswith("application/") and content_type.endswith("+json")
         ):
-            return None
+            return []
         if not public_only or not urlparse(url).path:
-            return None
-        if redirect_uris := _parse_metadata_document_redirect_uris(
-            url, body, HTTPStatus.OK, False
-        ):
-            return ClientInfo(redirect_uris)
-        return None
+            return []
+        return _parse_metadata_document_redirect_uris(url, body, HTTPStatus.OK, False)
 
     if body.lstrip().startswith(b"<"):
-        return ClientInfo(_parse_link_tag_redirect_uris(url, body), is_indieauth=True)
-    return None
+        return _parse_link_tag_redirect_uris(url, body)
+    return []
 
 
 def _parse_link_tag_redirect_uris(url: str, body: bytes) -> list[str]:
