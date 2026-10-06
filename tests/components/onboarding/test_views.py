@@ -346,11 +346,19 @@ async def test_onboarding_user_race(
     assert sorted([res1.status, res2.status]) == [HTTPStatus.OK, HTTPStatus.FORBIDDEN]
 
 
+@pytest.mark.parametrize(
+    "token_data",
+    [
+        pytest.param({}, id="without-redirect-uri"),
+        pytest.param({"redirect_uri": CLIENT_REDIRECT_URI}, id="with-redirect-uri"),
+    ],
+)
 async def test_onboarding_integration(
     hass: HomeAssistant,
     hass_storage: dict[str, Any],
     hass_client: ClientSessionGenerator,
     hass_admin_user: MockUser,
+    token_data: dict[str, str],
 ) -> None:
     """Test finishing integration step."""
     mock_storage(hass_storage, {"done": [const.STEP_USER]})
@@ -376,6 +384,7 @@ async def test_onboarding_integration(
             "client_id": CLIENT_ID,
             "grant_type": "authorization_code",
             "code": data["auth_code"],
+            **token_data,
         },
     )
 

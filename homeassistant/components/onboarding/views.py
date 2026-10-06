@@ -337,7 +337,10 @@ class IntegrationOnboardingView(_BaseOnboardingStepView):
             from homeassistant.components.auth import create_auth_code  # noqa: PLC0415
 
             auth_code = create_auth_code(
-                hass, data["client_id"], refresh_token.credential
+                hass,
+                data["client_id"],
+                refresh_token.credential,
+                redirect_uri=data["redirect_uri"],
             )
             return self.json({"auth_code": auth_code})
 
